@@ -216,7 +216,13 @@ fn closed_address() -> String {
 #[tokio::test]
 async fn the_entry_that_answers_is_the_address_written_when_the_first_one_fails() {
     let closed = closed_address();
-    let (root, server) = server("200 OK", "", r#"{"data":[{"id":"gpt-test-codex"}]}"#);
+    // A Codex model can only be imported with a known context window (as in the manifest
+    // of capability_server above).
+    let (root, server) = server(
+        "200 OK",
+        "",
+        r#"{"models":[{"slug":"gpt-test-codex","input_modalities":["text"],"context_window":65536}]}"#,
+    );
     let plan = [
         (0, 0, models::Route::System),
         (0, 0, models::Route::Direct),
