@@ -48,6 +48,9 @@ export default function App() {
   const [busy, setBusy] = useState<Client | null>(null);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState<Client | null>(null);
+  const [viaSystem, setViaSystem] = useState(false);
+  const [slow, setSlow] = useState(false);
+  const running = useRef(false);
   const [hint, setHint] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
@@ -82,15 +85,19 @@ export default function App() {
     } catch { setHint(PASTE_TIP); field.current?.focus(); }
   }
   async function connect(client: Client) {
-    if (disabled || !ready) return;
+    // A second click before the first is drawn as busy must not start a second discovery.
+    if (disabled || !ready || running.current) return;
     // Nothing is sent until the text has the shape of a key (the native side checks again).
     const problem = keyProblem(apiKey);
     if (problem) { setHint(problem); field.current?.focus(); return; }
     setError(""); setRetry(null); setHint(""); setResult(null); setRestored(false);
     if (!nativeAvailable) { setError("这是界面预览，要在 xxchun Connect 应用里才能接入。"); return; }
-    setBusy(client);
+    running.current = true; setBusy(client); setSlow(false);
+    // The native side retries by itself for a while (it has no channel to report progress on).
+    const waiting = window.setTimeout(() => setSlow(true), 2500);
     try {
       const found = await discoverModels({ client, baseUrl: DEFAULT_STATION.baseUrl, apiKey: cleanKey(apiKey) });
+      window.clearTimeout(waiting); setSlow(false); setViaSystem(found.viaSystemNetwork === true);
       const chosen = pickModels(client, found.models.map((model) => model.id).filter((id) => clientFamily(client) === "codex" || found.capabilities?.models[id]?.messages.status !== "unsupported"));
       if (!chosen.ids.length) { setError(wrongKeyMessage(client)); return; }
       const input: SelectionInput = { discoveryId: found.discoveryId, selectedModels: chosen.ids, defaultModel: chosen.defaultId, toolSearch: "auto", options: selectedOptions(client, chosen.ids, DEFAULT_OPTIONS) };
@@ -100,7 +107,7 @@ export default function App() {
       try { await refresh(); } catch { /* the import itself is done */ }
     } catch (reason) {
       setError(typeof reason === "string" ? reason : "没接上，请稍后再试。"); setRetry(client);
-    } finally { setBusy(null); }
+    } finally { window.clearTimeout(waiting); running.current = false; setBusy(null); setSlow(false); }
   }
   const target = (client: Client, big: boolean) => {
     const info = clients.find((item) => item.id === client)!, state = status?.clients.find((item) => item.client === client);
@@ -108,7 +115,7 @@ export default function App() {
     return (
       <button key={client} type="button" className={big ? "xc-target" : "xc-target xc-target-small"} data-client={client} disabled={disabled || !ready || !!blocked} onClick={() => void connect(client)}>
         {busy === client ? <LoaderCircle className="spinning" size={big ? 26 : 18} /> : <ClientIcon client={client} size={big ? 26 : 18} />}
-        <span><strong>{busy === client ? "正在接入…" : big ? `接到 ${shortName(client)}` : `接到 ${info.name}`}</strong>
+        <span><strong>{busy === client ? (slow ? "正在连接，自动重试中…" : "正在接入…") : big ? `接到 ${shortName(client)}` : `接到 ${info.name}`}</strong>
           <small>{blocked ?? (missing ? `这台电脑上还没找到 ${info.name}，先装好它` : big ? info.name : info.hint)}</small></span>
       </button>
     );
@@ -126,12 +133,14 @@ export default function App() {
       </header>
       <div className="workspace">
         {(!nativeAvailable || status?.sandbox) && <div className="preview-label">{!nativeAvailable ? "界面预览 · 接入要在应用里做" : "测试模式 · 使用独立配置目录"}</div>}
+        {status?.unextracted && <div className="preview-label">建议先把压缩包解压到桌面再打开</div>}
         <section className="wizard-card xc-card" aria-labelledby="step-title" aria-busy={disabled}>
           {result && done ? (
             <div className="success-content" role="status">
               <span className="success-mark"><Check size={28} strokeWidth={1.7} /></span>
               <h2 id="step-title" ref={heading} tabIndex={-1}>好了，完全退出 {shortName(result.client)} 再打开</h2>
               <p>{done.name} 已经接到 xxchun。只关窗口不算退出。</p>
+              {viaSystem && <p className="xc-via-system">已通过系统网络连接</p>}
               <div className="activation-guide">
                 <strong>接下来</strong>
                 <ol>{result.nextSteps.map((text) => <li key={text}>{text}</li>)}</ol>
@@ -166,7 +175,7 @@ export default function App() {
                 <div className="notice notice-error xc-error" role="alert"><CircleAlert size={16} />
                   <div className="xc-error-body"><p>{shown.message}</p>
                     {shown.detail && <p className="xc-error-detail">{shown.detail}</p>}
-                    {retry && <button type="button" className="xc-retry" disabled={disabled || !ready} onClick={() => void connect(retry)}>{busy === retry ? "正在重试…" : "再试一次"}</button>}</div>
+                    {retry && <button type="button" className="xc-retry" disabled={disabled || !ready} onClick={() => void connect(retry)}>{busy === retry ? (slow ? "正在连接，自动重试中…" : "正在重试…") : "再试一次"}</button>}</div>
                   <button className="icon-button" aria-label="关闭提示" onClick={() => { setError(""); setRetry(null); }}><X size={15} /></button>
                 </div>
               )}

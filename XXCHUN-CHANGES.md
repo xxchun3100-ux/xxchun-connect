@@ -1,6 +1,6 @@
 # xxchun Connect：相对上游改了什么
 
-上游：https://github.com/superpilot69/supergpt-connect ，tag `v0.1.6`（提交 65c260e）。本分支版本 0.1.2。
+上游：https://github.com/superpilot69/supergpt-connect ，tag `v0.1.6`（提交 65c260e）。本分支版本 0.1.3。
 
 ## 没有在这台机器上验证的
 
@@ -82,3 +82,49 @@
 - 版本 0.1.2：四处，`Cargo.lock` 只改根包版本。
 
 没有验证的：Rust 仍然没在这台机器上编译；界面没有在真应用里点过。
+
+## 0.1.3（2026-11-21）
+
+又有两位 0.1.0 的用户，密钥看得见是对的，还是「无法连接 API」，同一台电脑的浏览器能打开网站。其中一位的录屏里，点下去大约一秒就报错（不是超时，是连接或握手很快失败），而且「疯狂点就会接成」。也就是说：建立连接在他们的线路上时好时坏，单纯重试就有用；另一类常见情况是杀毒软件 / 加速器 / 公司代理做 HTTPS 扫描——它们的根证书在 Windows 证书库里，但 reqwest 用的是打包进去的 webpki 根证书，不认。
+
+### 读取模型怎么试（`src-tauri/src/models.rs`）
+
+- 一共最多 9 次，`attempt_plan()`：四轮，每轮先 `System`（reqwest，按系统设置，含系统代理）再 `Direct`（reqwest，`.no_proxy()`），轮与轮之间等 0 / 0.4 / 1 / 2 秒；最后 `Curl`（系统自带的 curl）一次。
+- 只有「根本没拿到 HTTP 回答」才试下一次。拿到任何状态码（401、404、500…）就停，按状态码报。请求拼不出来、读内容失败、内容过大也不再试。
+- 时间：第一次最多 15 秒；之后的 reqwest 尝试合起来只用到第 16 秒为止（`attempt_seconds`：剩余不足 2 秒就跳过，直接去 curl），curl 最多 8 秒（10 秒还没结束就杀掉）。所以失败得快的会被多试几轮，一次慢的超时不会被重复。最坏大约 26 秒。
+- 每次尝试都新建一个 reqwest 客户端，并且不保留空闲连接（`pool_max_idle_per_host(0)`）。
+- 等待用的是 `std::thread::sleep`，curl 也是同步等子进程：这个库的正式依赖里没有 tokio（只在测试依赖里），所以这些等待会占住一个异步工作线程。应用只有一个窗口、一次只做一件事，够用；要改成真正的异步得加依赖。
+- curl：Windows 是 `%SystemRoot%\System32\curl.exe`（Windows 10 1803 起自带，走 Schannel 和系统证书库），其他系统是 `/usr/bin/curl`。用 `std::process::Command` 启动，Windows 上带 `CREATE_NO_WINDOW`（和 `compatibility.rs` 里查版本的写法一样）。
+  - 命令行参数固定是 `-q --config -`。网址、`Authorization: Bearer …`、`Accept`、`max-time`、`max-filesize`、`proto = "=http,https"`、`globoff`、`silent`、`show-error`、`write-out = "\n%{http_code}"` 都写进子进程的标准输入；配置里的值会转义反斜杠和双引号，换行写成 `\n`。没有 `location`，不跟随跳转。
+  - 输出最多读 2 MB + 64 字节，超了就关掉管道，按「模型目录过大」报。
+  - 没有 curl 或启动不了：不算一次失败，报错里就没有 curl 那一段。
+- 状态码和内容的处理（`catalog_payload`）所有路共用。
+
+### 通了以后
+
+- 哪条路通了就一直用它（`Transport`）。**这个应用里除了读模型目录，只有另外两处联网**：Codex 的无参数回退（目录接口不认 `client_version` 时），和 Claude 的能力探测 `capabilities::discover`（`/v1/sub2api/connect`，签名从 `&reqwest::Client` 改成 `&models::Transport`）。这两处现在都用 `get_retrying`：同一条路，连不上就等 0.4 秒、1 秒各再试一次，超时不重试。`adapter.rs` 的写配置、预览、恢复都不联网。
+- `DiscoveredModels` 多了 `system_network`，给界面的是 `viaSystemNetwork`；走 curl 通的，成功页显示「已通过系统网络连接」。
+
+### 报错
+
+- 「连不上 xxchun（api.xxchun.com）。请暂时关掉代理/VPN 和杀毒软件的"HTTPS 扫描/网页防护"再试，或换个网络。」；每一次都是超时的话，开头是「连接 xxchun（api.xxchun.com）超时了。」
+- 小字一行：「试了 9 次：connect ×6, tls ×2, timeout ×1。系统网络设置：…；不走代理：…；系统自带 curl：…」——各类原因的次数，加每条路最后一次的类别和原因。原因照旧去掉密钥、`Bearer` 后面的内容、网址参数和账号密码，每段最长 300 字。curl 的类别按退出码定。
+
+### 界面
+
+- 等超过 2.5 秒，按钮上的字从「正在接入…」变成「正在连接，自动重试中…」。原生层没有往界面报进度的通道（没有用事件），所以没有做「第 N 次」。
+- 「再试一次」还在。接入进行中所有按钮本来就是禁用的；另外加了一个不依赖重新渲染的标记，连点两下也只发起一次（原生层的 `BusyGuard` 是第二道）。
+- `app_status` 多返回 `unextracted`：程序所在路径里有 `\Temp\`，并且带压缩软件的痕迹（`Rar$`、`\7z`、`.zip`、`Temp1_`、`BNZ.`、`360zip`、`haozip`）时为真，窗口上方显示「建议先把压缩包解压到桌面再打开」。只提示，不拦。判断在 `compatibility::runs_from_archive`。
+
+### 测试
+
+- `models.rs` 的 `connection_tests`：尝试计划和时间分配、哪些失败值得再试、原因计数和小字拼接、curl 配置（密钥不在参数里、转义）、curl 输出解析、curl 结果归类、状态处理。
+- `compatibility.rs` 的 `archive_tests`：压缩包临时路径的识别。
+- `tests/model_discovery.rs`：真跑 curl 打本地假服务器（机器上没有 curl 就跳过）；连不上的端口走一轮加 curl，检查小字。
+
+### 要知道的限制
+
+- **Windows 的 curl 不读「系统代理」设置**（只认 `HTTPS_PROXY` 这类环境变量）。所以最后一条路实际是「不走代理 + 系统证书库」：能解决 HTTPS 扫描，解决不了「必须走代理才能出去」的网络。
+- 在做 HTTPS 扫描的机器上，Schannel 可能因为查不到证书吊销信息而失败；没有加 `ssl-revoke-best-effort`（老版本 curl 不认识这个选项）。
+- 这些只让「读取模型」更容易通。Claude / Codex 之后自己联网，用的是它们自己的网络栈；同一台机器上它们可能照样时好时坏或被拦。成功页那行小字就是为了这种时候好排查。
+- Rust 仍然没在这台机器上编译；curl 这条路没有在真的 HTTPS 扫描环境里试过；界面没有在真应用里点过。

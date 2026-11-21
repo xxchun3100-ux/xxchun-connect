@@ -206,6 +206,30 @@ async fn a_key_without_models_for_this_client_is_told_which_key_to_copy() {
     server.join().unwrap();
 }
 
+// Runs only where the operating system ships curl (Windows 10 1803+, macOS).
+#[tokio::test]
+async fn the_systems_own_curl_reads_the_catalog_without_the_key_in_its_arguments() {
+    if !models::system_curl_available() {
+        return;
+    }
+    let (root, server) = server("200 OK", "", r#"{"data":[{"id":"gpt-test-codex"}]}"#);
+    let data = models::discover_with(request(root), &[(0, models::Route::Curl)])
+        .await
+        .unwrap();
+    assert_eq!(data.choices[0].id, "gpt-test-codex");
+    assert!(data.system_network);
+    assert!(
+        models::DiscoverySession::new(data)
+            .response()
+            .via_system_network
+    );
+    let received = server.join().unwrap();
+    assert!(received.starts_with("GET /v1/models?client_version="));
+    assert!(received
+        .to_lowercase()
+        .contains("authorization: bearer sk-xc-testnotarealkey00000000000000000"));
+}
+
 #[tokio::test]
 async fn text_that_is_not_a_complete_key_is_refused_before_any_request() {
     // Nothing listens on this address; a request would fail with a connection message.
@@ -220,20 +244,35 @@ async fn text_that_is_not_a_complete_key_is_refused_before_any_request() {
 }
 
 #[tokio::test]
-async fn an_unreachable_api_is_retried_without_a_proxy_and_explains_itself() {
+async fn an_unreachable_api_is_tried_every_way_and_explains_itself() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let root = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
-    let error = models::discover(request(root)).await.err().unwrap();
+    // One round and the system's curl; the app's own plan has four rounds with waits.
+    let plan = [
+        (0, models::Route::System),
+        (0, models::Route::Direct),
+        (0, models::Route::Curl),
+    ];
+    let error = models::discover_with(request(root), &plan)
+        .await
+        .err()
+        .unwrap();
     let (advice, detail) = error.split_once('\n').unwrap();
     assert!(advice.contains("xxchun（127.0.0.1）"));
-    assert!(advice.contains("请关掉代理/VPN 再试一次"));
-    assert!(detail.contains("不走代理"));
+    assert!(advice.contains("请暂时关掉代理/VPN"));
+    assert!(detail.starts_with("试了 "));
+    assert!(detail.contains("系统网络设置：") && detail.contains("不走代理："));
+    assert_eq!(
+        detail.contains("系统自带 curl："),
+        models::system_curl_available()
+    );
     assert!(!error.contains("sk-xc-") && !error.contains("client_version"));
 }
 
 fn discovered(client: Client) -> models::DiscoveredModels {
     models::DiscoveredModels {
+        system_network: false,
         capabilities: Default::default(),
         client,
         api_key: "sk-only-in-memory".into(),

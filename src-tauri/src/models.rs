@@ -89,6 +89,7 @@ pub struct DiscoveryResponse {
     pub base_url: String,
     pub models: Vec<ModelChoice>,
     pub capabilities: crate::capabilities::RouteCapabilities,
+    pub via_system_network: bool,
 }
 
 pub struct DiscoveredModels {
@@ -98,6 +99,8 @@ pub struct DiscoveredModels {
     pub payload: Value,
     pub choices: Vec<ModelChoice>,
     pub capabilities: crate::capabilities::RouteCapabilities,
+    // The catalog could only be read through the operating system's own HTTP stack.
+    pub system_network: bool,
 }
 pub struct ValidatedInput {
     pub client: Client,
@@ -135,6 +138,7 @@ impl DiscoverySession {
             base_url: self.data.root.clone(),
             models: self.data.choices.clone(),
             capabilities: self.data.capabilities.clone(),
+            via_system_network: self.data.system_network,
         }
     }
     pub fn prepare(&self, input: &SelectionInput) -> Result<ValidatedInput, String> {
@@ -207,41 +211,401 @@ pub fn catalog_models(payload: &Value) -> Vec<String> {
 // model list can contain names only, omitting image and reasoning capabilities.
 const CODEX_CATALOG_CLIENT_VERSION: &str = "0.162.0";
 
-fn http_client(direct: bool) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none());
-    if direct {
-        builder = builder.no_proxy();
+const BODY_LIMIT: usize = 2 * 1024 * 1024;
+const READ_FAILED: &str = "读取模型目录失败，请重试。";
+const TOO_LARGE: &str = "模型目录过大，配置尚未写入。";
+const HTTP_SECONDS: u64 = 15;
+// After the first attempt the reqwest attempts share this much time, so that fast failures
+// are retried several times while one slow attempt is not repeated.
+const HTTP_BUDGET_MS: u64 = 16_000;
+const CURL_SECONDS: u64 = 8;
+// Waits before each round (a round is the system-settings client, then the direct one).
+// Establishing the connection is flaky on some customers' paths and a plain retry works.
+const ROUND_WAITS_MS: [u64; 4] = [0, 400, 1000, 2000];
+// Later requests of a discovery are retried on the transport that already worked.
+const FOLLOW_UP_WAITS_MS: [u64; 3] = [0, 400, 1000];
+// The key is never an argument (other programs can read arguments): the whole request is
+// a config read from standard input. -q keeps a personal .curlrc out of it.
+const CURL_ARGS: [&str; 3] = ["-q", "--config", "-"];
+
+// The ways a request is made: as the system is set up (its proxy included), without any
+// proxy, and through the operating system's own curl, which trusts the system certificate
+// store (HTTPS scanning by antivirus adds its certificate there, and the bundled roots
+// used by the first two do not know it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    System,
+    Direct,
+    Curl,
+}
+// A route that was tried, the kind of its cause, and the sanitized cause.
+type Tried = (Route, &'static str, String);
+
+// Every attempt of a discovery, in order, with the wait before it in milliseconds:
+// four rounds of both clients, then the system's curl once.
+pub fn attempt_plan() -> Vec<(u64, Route)> {
+    let mut plan = Vec::new();
+    for wait in ROUND_WAITS_MS {
+        plan.push((wait, Route::System));
+        plan.push((0, Route::Direct));
     }
-    builder
-        .build()
-        .map_err(|_| "无法初始化网络连接。".to_string())
+    plan.push((0, Route::Curl));
+    plan
 }
 
-async fn fetch_catalog(
-    client: &reqwest::Client,
-    endpoint: &str,
-    api_key: &str,
-    codex_manifest: bool,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let mut request = client
-        .get(endpoint)
-        .bearer_auth(api_key)
-        .header("Accept", "application/json");
-    if codex_manifest {
-        request = request.query(&[("client_version", CODEX_CATALOG_CLIENT_VERSION)]);
+// How long an attempt may take, or None when it is skipped because the time for retries
+// is used up. `elapsed_ms` is the time since the discovery began, the wait included.
+fn attempt_seconds(route: Route, first: bool, elapsed_ms: u64) -> Option<u64> {
+    if route == Route::Curl {
+        return Some(CURL_SECONDS);
     }
-    request.send().await
+    if first {
+        return Some(HTTP_SECONDS);
+    }
+    let left = HTTP_BUDGET_MS.saturating_sub(elapsed_ms) / 1000;
+    if left < 2 {
+        None
+    } else {
+        Some(left.min(HTTP_SECONDS))
+    }
+}
+
+// A failure that came back quickly may be gone a moment later; a timeout is not repeated.
+fn worth_retrying(outcome: &Result<Reply, Failure>) -> bool {
+    matches!(outcome, Err(Failure::Unreachable { kind, .. }) if *kind != "timeout")
+}
+
+// The crate has no async timer among its dependencies; the waits are short.
+fn pause(milliseconds: u64) {
+    if milliseconds > 0 {
+        std::thread::sleep(Duration::from_millis(milliseconds));
+    }
+}
+
+impl Route {
+    fn label(self) -> &'static str {
+        match self {
+            Self::System => "系统网络设置",
+            Self::Direct => "不走代理",
+            Self::Curl => "系统自带 curl",
+        }
+    }
+}
+
+// Whatever reached the API first is used for every later request of the same discovery.
+pub enum Transport {
+    Http(reqwest::Client),
+    Curl,
+}
+#[derive(Debug, PartialEq)]
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    // Read only for a successful status on the reqwest routes; never more than BODY_LIMIT.
+    pub(crate) body: Vec<u8>,
+}
+#[derive(Debug, PartialEq)]
+pub(crate) enum Failure {
+    // No HTTP answer at all. The detail is already sanitized; the kind "timeout" is a timeout.
+    Unreachable { kind: &'static str, detail: String },
+    // This computer has no system curl.
+    Unavailable,
+    // The request could not even be put together: that is the pasted text, not the network.
+    Builder,
+    Message(&'static str),
+}
+impl Failure {
+    fn into_message(self, host: &str, route: Route) -> String {
+        match self {
+            Self::Builder => KEY_HELP.to_string(),
+            Self::Message(message) => message.to_string(),
+            Self::Unavailable => connection_message(host, false, ""),
+            Self::Unreachable { kind, detail } => {
+                unreachable_message(host, &[(route, kind, detail)])
+            }
+        }
+    }
+}
+impl Transport {
+    // A new client for every attempt, and no idle connections kept: nothing is reused
+    // from a connection that may have gone bad.
+    fn open(route: Route) -> Result<Self, String> {
+        let direct = match route {
+            Route::System => false,
+            Route::Direct => true,
+            Route::Curl => return Ok(Transport::Curl),
+        };
+        let mut builder = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .redirect(reqwest::redirect::Policy::none());
+        if direct {
+            builder = builder.no_proxy();
+        }
+        builder
+            .build()
+            .map(Transport::Http)
+            .map_err(|_| "无法初始化网络连接。".to_string())
+    }
+    // Credentials stay on this exact origin; redirects are never followed.
+    async fn get(&self, url: &str, api_key: &str, seconds: u64) -> Result<Reply, Failure> {
+        match self {
+            Transport::Http(client) => http_get(client, url, api_key, seconds).await,
+            // This waits for the child process (at most `seconds` + 2).
+            Transport::Curl => curl_get(url, api_key, seconds),
+        }
+    }
+    // For the requests that follow the first answer: the same transport, tried again
+    // after a short wait when the connection could not be made.
+    pub(crate) async fn get_retrying(&self, url: &str, api_key: &str) -> Result<Reply, Failure> {
+        let mut outcome = Err(Failure::Unavailable);
+        for wait in FOLLOW_UP_WAITS_MS {
+            pause(wait);
+            outcome = self.get(url, api_key, HTTP_SECONDS).await;
+            if !worth_retrying(&outcome) {
+                break;
+            }
+        }
+        outcome
+    }
+}
+
+async fn http_get(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    seconds: u64,
+) -> Result<Reply, Failure> {
+    let sent = client
+        .get(url)
+        .timeout(Duration::from_secs(seconds))
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await;
+    let mut response = match sent {
+        Ok(response) => response,
+        Err(error) if error.is_builder() => return Err(Failure::Builder),
+        Err(error) => {
+            let (kind, detail) = describe_error(&error, api_key);
+            return Err(Failure::Unreachable { kind, detail });
+        }
+    };
+    let status = response.status().as_u16();
+    let mut body = Vec::new();
+    if response.status().is_success() {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| Failure::Message(READ_FAILED))?
+        {
+            if body.len() + chunk.len() > BODY_LIMIT {
+                return Err(Failure::Message(TOO_LARGE));
+            }
+            body.extend_from_slice(&chunk);
+        }
+    }
+    Ok(Reply { status, body })
+}
+
+fn curl_program() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let path = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("C:\\Windows"))
+        .join("System32")
+        .join("curl.exe");
+    #[cfg(not(windows))]
+    let path = std::path::PathBuf::from("/usr/bin/curl");
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+pub fn system_curl_available() -> bool {
+    curl_program().is_some()
+}
+
+// A quoted value of a curl config file: backslash and double quote are escaped.
+fn curl_quote(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+// One GET without redirects. The status code is printed after the body on a line of its own.
+fn curl_config(url: &str, api_key: &str, seconds: u64) -> String {
+    let mut lines = vec![
+        format!("url = {}", curl_quote(url)),
+        format!(
+            "header = {}",
+            curl_quote(&format!("Authorization: Bearer {api_key}"))
+        ),
+        format!("header = {}", curl_quote("Accept: application/json")),
+        format!("max-time = {seconds}"),
+        format!("max-filesize = {BODY_LIMIT}"),
+        format!("proto = {}", curl_quote("=http,https")),
+        format!("write-out = {}", curl_quote("\n%{http_code}")),
+    ];
+    for flag in ["globoff", "silent", "show-error"] {
+        lines.push(flag.to_string());
+    }
+    lines.join("\n") + "\n"
+}
+
+fn parse_curl_output(stdout: &[u8]) -> Option<Reply> {
+    let at = stdout.iter().rposition(|byte| *byte == b'\n')?;
+    let code = &stdout[at + 1..];
+    if code.len() != 3 || !code.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let status: u16 = std::str::from_utf8(code).ok()?.parse().ok()?;
+    if status < 100 {
+        // curl prints 000 when it got no answer.
+        return None;
+    }
+    Some(Reply {
+        status,
+        body: stdout[..at].to_vec(),
+    })
+}
+
+fn curl_kind(code: Option<i32>) -> &'static str {
+    match code {
+        Some(28) | None => "timeout",
+        Some(5 | 97) => "proxy",
+        Some(6) => "dns",
+        Some(7) => "connect",
+        Some(35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 80 | 82 | 83 | 90 | 91) => "tls",
+        Some(_) => "request",
+    }
+}
+
+// `code` is None when curl had to be stopped.
+fn curl_outcome(
+    code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+    api_key: &str,
+) -> Result<Reply, Failure> {
+    if stdout.len() > BODY_LIMIT + 16 || code == Some(63) {
+        return Err(Failure::Message(TOO_LARGE));
+    }
+    if code == Some(0) {
+        if let Some(reply) = parse_curl_output(stdout) {
+            return Ok(reply);
+        }
+    }
+    let said = String::from_utf8_lossy(stderr);
+    let said = said.trim();
+    let cause = match (said.is_empty(), code) {
+        (false, _) => said.to_string(),
+        (true, Some(code)) => format!("curl exit {code}"),
+        (true, None) => "curl did not finish".to_string(),
+    };
+    Err(Failure::Unreachable {
+        kind: curl_kind(code),
+        detail: sanitize_cause(&cause, api_key),
+    })
+}
+
+fn read_limited<R: std::io::Read>(source: Option<R>, limit: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if let Some(source) = source {
+        // Dropping the pipe at the limit makes the child stop instead of filling memory.
+        let _ = source.take(limit as u64).read_to_end(&mut bytes);
+    }
+    bytes
+}
+
+fn curl_get(url: &str, api_key: &str, seconds: u64) -> Result<Reply, Failure> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let Some(program) = curl_program() else {
+        return Err(Failure::Unavailable);
+    };
+    let mut command = Command::new(program);
+    command
+        .args(CURL_ARGS)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let Ok(mut child) = command.spawn() else {
+        return Err(Failure::Unavailable);
+    };
+    let config = curl_config(url, api_key, seconds);
+    // The pipe is closed when the closure returns, so curl sees the end of its config.
+    let written = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(config.as_bytes()).is_ok())
+        .unwrap_or(false);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let body = std::thread::spawn(move || read_limited(stdout, BODY_LIMIT + 64));
+    let errors = std::thread::spawn(move || read_limited(stderr, 4096));
+    let start = Instant::now();
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) if written && start.elapsed() < Duration::from_secs(seconds + 2) => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let body = body.join().unwrap_or_default();
+    let errors = errors.join().unwrap_or_default();
+    curl_outcome(code, &body, &errors, api_key)
+}
+
+// The same reading of an answer whichever way it arrived.
+fn catalog_payload(reply: &Reply) -> Result<Value, String> {
+    if !(200..300).contains(&reply.status) {
+        return Err(match reply.status {
+            401 => "密钥未通过验证，请检查是否复制完整。".into(),
+            403 => "此密钥没有访问权限，请检查分组、有效期或账户状态。".into(),
+            404 | 405 => {
+                "此地址没有提供模型目录，请检查 API 基础地址。首版需要 /v1/models 接口。".into()
+            }
+            429 => "请求过于频繁或额度受限，请稍后重试。".into(),
+            code => format!("模型目录暂时不可用（HTTP {code}），配置尚未写入。"),
+        });
+    }
+    serde_json::from_slice(&reply.body)
+        .map_err(|_| "API 返回的模型目录不是有效 JSON。".to_string())
 }
 
 // The first line is for the person; the line after it is the technical cause, shown small.
 fn connection_message(host: &str, timed_out: bool, detail: &str) -> String {
-    let advice = if timed_out {
-        format!("连接 xxchun（{host}）超时了。请关掉代理/VPN 再试一次，或换个网络。")
+    let what = if timed_out {
+        format!("连接 xxchun（{host}）超时了。")
     } else {
-        format!("连不上 xxchun（{host}）。请关掉代理/VPN 再试一次，或换个网络。")
+        format!("连不上 xxchun（{host}）。")
     };
+    let advice = format!(
+        "{what}请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。"
+    );
     if detail.is_empty() {
         advice
     } else {
@@ -284,15 +648,49 @@ pub fn key_problem(input: &str) -> Option<String> {
     }
 }
 
-fn failure_detail(first: &str, direct: &str) -> String {
-    if first == direct {
-        format!("{first}（不走代理再试，结果一样）")
-    } else {
-        format!("按系统网络设置：{first}；不走代理：{direct}")
+// "connect ×3, tls ×1": each kind of cause with how often it was met, in the order met.
+fn cause_summary(kinds: &[&str]) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for kind in kinds {
+        match counts.iter().position(|(seen, _)| seen == kind) {
+            Some(at) => counts[at].1 += 1,
+            None => counts.push((*kind, 1)),
+        }
     }
+    counts
+        .iter()
+        .map(|(kind, count)| format!("{kind} ×{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
-fn describe_error(error: &reqwest::Error, api_key: &str) -> String {
+// One line: how many attempts and which kinds of cause, then the last cause on each route.
+fn failure_detail(failures: &[Tried]) -> String {
+    if failures.is_empty() {
+        return String::new();
+    }
+    let kinds: Vec<&str> = failures.iter().map(|(_, kind, _)| *kind).collect();
+    let mut last = Vec::new();
+    for route in [Route::System, Route::Direct, Route::Curl] {
+        if let Some((_, kind, detail)) = failures.iter().rev().find(|tried| tried.0 == route) {
+            last.push(format!("{}：{kind}: {detail}", route.label()));
+        }
+    }
+    format!(
+        "试了 {} 次：{}。{}",
+        failures.len(),
+        cause_summary(&kinds),
+        last.join("；")
+    )
+}
+
+fn unreachable_message(host: &str, failures: &[Tried]) -> String {
+    let timed_out =
+        !failures.is_empty() && failures.iter().all(|(_, kind, _)| *kind == "timeout");
+    connection_message(host, timed_out, &failure_detail(failures))
+}
+
+fn describe_error(error: &reqwest::Error, api_key: &str) -> (&'static str, String) {
     let chain = error_chain(error);
     let kind = cause_kind(
         error.is_timeout(),
@@ -300,7 +698,7 @@ fn describe_error(error: &reqwest::Error, api_key: &str) -> String {
         error.is_builder(),
         &chain,
     );
-    format!("{kind}: {}", sanitize_cause(&chain, api_key))
+    (kind, sanitize_cause(&chain, api_key))
 }
 
 fn error_chain(error: &dyn std::error::Error) -> String {
@@ -413,6 +811,14 @@ fn sanitize_cause(text: &str, api_key: &str) -> String {
 }
 
 pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String> {
+    discover_with(input, &attempt_plan()).await
+}
+
+// `plan` is the attempts to make, each with the wait before it; the app uses attempt_plan().
+pub async fn discover_with(
+    input: DiscoveryInput,
+    plan: &[(u64, Route)],
+) -> Result<DiscoveredModels, String> {
     // Nothing is sent anywhere until the text has the shape of a key.
     if let Some(problem) = key_problem(&input.api_key) {
         return Err(problem);
@@ -423,72 +829,51 @@ pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String>
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
         .unwrap_or_else(|| root.clone());
-    let mut client = http_client(false)?;
     let endpoint = format!("{root}/v1/models");
     let codex = input.client.is_codex();
-    // Credentials stay on this exact origin; redirects and bodies are never echoed.
-    let attempt = fetch_catalog(&client, &endpoint, &api_key, codex).await;
-    let mut response = match attempt {
-        Ok(response) => response,
-        // The request could not even be put together: that is the pasted text, not the network.
-        Err(first) if first.is_builder() => return Err(KEY_HELP.into()),
-        Err(first) => {
-            // A system proxy that is switched on but not answering is the usual reason a
-            // reachable API cannot be reached. Try once more without any proxy, and keep
-            // that direct client for the rest of this discovery when it works.
-            client = http_client(true)?;
-            let direct = fetch_catalog(&client, &endpoint, &api_key, codex).await;
-            match direct {
-                Ok(response) => response,
-                Err(second) => {
-                    let detail = failure_detail(
-                        &describe_error(&first, &api_key),
-                        &describe_error(&second, &api_key),
-                    );
-                    return Err(connection_message(&host, second.is_timeout(), &detail));
-                }
-            }
-        }
+    let catalog_url = if codex {
+        format!("{endpoint}?client_version={CODEX_CATALOG_CLIENT_VERSION}")
+    } else {
+        endpoint.clone()
     };
-    if codex && matches!(response.status().as_u16(), 400 | 404 | 405 | 422) {
+    // A flaky connection, a system proxy that is switched on but not answering, or HTTPS
+    // scanning by antivirus is the usual reason a reachable API cannot be reached: go
+    // through the plan until one attempt gets an HTTP answer, and keep that transport for
+    // the rest of this discovery. Any HTTP answer ends the attempts, whatever its status.
+    let started = Instant::now();
+    let mut failures: Vec<Tried> = Vec::new();
+    let mut reached = None;
+    for (index, (wait, route)) in plan.iter().copied().enumerate() {
+        let elapsed = started.elapsed().as_millis() as u64 + wait;
+        let Some(seconds) = attempt_seconds(route, index == 0, elapsed) else {
+            continue;
+        };
+        pause(wait);
+        let transport = Transport::open(route)?;
+        let outcome = transport.get(&catalog_url, &api_key, seconds).await;
+        match outcome {
+            Ok(reply) => {
+                reached = Some((transport, route, reply));
+                break;
+            }
+            Err(Failure::Unreachable { kind, detail }) => failures.push((route, kind, detail)),
+            // No system curl on this computer: the causes found so far stand.
+            Err(Failure::Unavailable) => {}
+            Err(failure) => return Err(failure.into_message(&host, route)),
+        }
+    }
+    let Some((transport, route, mut reply)) = reached else {
+        return Err(unreachable_message(&host, &failures));
+    };
+    if codex && matches!(reply.status, 400 | 404 | 405 | 422) {
         // Some third-party gateways reject query parameters. Fall back once,
         // but never retry authentication, rate-limit, redirect, or server errors.
-        response = fetch_catalog(&client, &endpoint, &api_key, false)
-            .await
-            .map_err(|error| {
-                if error.is_builder() {
-                    return KEY_HELP.to_string();
-                }
-                let detail = describe_error(&error, &api_key);
-                connection_message(&host, error.is_timeout(), &detail)
-            })?;
+        let plain = transport.get_retrying(&endpoint, &api_key).await;
+        reply = plain.map_err(|failure| failure.into_message(&host, route))?;
     }
-    if !response.status().is_success() {
-        return Err(match response.status().as_u16() {
-            401 => "密钥未通过验证，请检查是否复制完整。".into(),
-            403 => "此密钥没有访问权限，请检查分组、有效期或账户状态。".into(),
-            404 | 405 => {
-                "此地址没有提供模型目录，请检查 API 基础地址。首版需要 /v1/models 接口。".into()
-            }
-            429 => "请求过于频繁或额度受限，请稍后重试。".into(),
-            code => format!("模型目录暂时不可用（HTTP {code}），配置尚未写入。"),
-        });
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "读取模型目录失败，请重试。")?
-    {
-        if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
-            return Err("模型目录过大，配置尚未写入。".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let payload: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "API 返回的模型目录不是有效 JSON。")?;
+    let payload = catalog_payload(&reply)?;
     let capabilities = if !input.client.is_codex() {
-        crate::capabilities::discover(&client, &root, &api_key).await
+        crate::capabilities::discover(&transport, &root, &api_key).await
     } else {
         Default::default()
     };
@@ -529,6 +914,7 @@ pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String>
         payload,
         choices,
         capabilities,
+        system_network: route == Route::Curl,
     })
 }
 
@@ -780,6 +1166,7 @@ mod session_tests {
     #[test]
     fn expired_discovery_requires_a_new_fetch_even_with_the_matching_id() {
         let mut session = DiscoverySession::new(DiscoveredModels {
+            system_network: false,
             capabilities: Default::default(),
             client: Client::Claude,
             api_key: "fake-only".into(),
@@ -848,18 +1235,205 @@ mod connection_tests {
     fn connection_failures_say_what_to_do_and_keep_the_cause_on_its_own_line() {
         assert_eq!(
             connection_message("api.xxchun.com", false, "connect: refused"),
-            "连不上 xxchun（api.xxchun.com）。请关掉代理/VPN 再试一次，或换个网络。\nconnect: refused"
+            "连不上 xxchun（api.xxchun.com）。请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。\nconnect: refused"
         );
         let timeout = connection_message("api.xxchun.com", true, "");
-        assert!(timeout.contains("超时") && !timeout.contains('\n'));
+        assert!(timeout.starts_with("连接 xxchun（api.xxchun.com）超时了。请暂时关掉代理/VPN"));
+        assert!(!timeout.contains('\n'));
+    }
+    #[test]
+    fn the_plan_is_four_rounds_of_both_clients_then_the_systems_curl_once() {
+        let plan = attempt_plan();
+        let waits: Vec<u64> = plan.iter().map(|(wait, _)| *wait).collect();
+        assert_eq!(waits, vec![0, 0, 400, 0, 1000, 0, 2000, 0, 0]);
+        for round in plan[..8].chunks(2) {
+            assert_eq!((round[0].1, round[1].1), (Route::System, Route::Direct));
+        }
+        assert_eq!(plan[8], (0, Route::Curl));
+        // The first attempt may take its full time; later ones share what is left, and
+        // are skipped when too little is left. The system's curl is always tried.
+        assert_eq!(attempt_seconds(Route::System, true, 0), Some(15));
+        assert_eq!(attempt_seconds(Route::Direct, false, 1_000), Some(15));
+        assert_eq!(attempt_seconds(Route::System, false, 9_400), Some(6));
+        assert_eq!(attempt_seconds(Route::Direct, false, 14_500), None);
+        assert_eq!(attempt_seconds(Route::Direct, false, 60_000), None);
+        assert_eq!(attempt_seconds(Route::Curl, false, 60_000), Some(8));
+    }
+    #[test]
+    fn only_a_quick_failure_to_connect_is_tried_again() {
+        let failed = |kind: &'static str| -> Result<Reply, Failure> {
+            Err(Failure::Unreachable {
+                kind,
+                detail: String::new(),
+            })
+        };
+        assert!(worth_retrying(&failed("connect")));
+        assert!(worth_retrying(&failed("tls")));
+        assert!(!worth_retrying(&failed("timeout")));
+        assert!(!worth_retrying(&Err(Failure::Builder)));
+        assert!(!worth_retrying(&Err(Failure::Unavailable)));
+        assert!(!worth_retrying(&Err(Failure::Message(TOO_LARGE))));
+        assert!(!worth_retrying(&Ok(Reply {
+            status: 500,
+            body: Vec::new()
+        })));
+    }
+    #[test]
+    fn the_causes_are_counted_and_the_last_one_of_each_route_is_kept() {
         assert_eq!(
-            failure_detail("connect: a", "connect: a"),
-            "connect: a（不走代理再试，结果一样）"
+            cause_summary(&["connect", "tls", "connect", "connect"]),
+            "connect ×3, tls ×1"
+        );
+        assert_eq!(cause_summary(&[]), "");
+        let failures: Vec<Tried> = vec![
+            (Route::System, "proxy", "a".to_string()),
+            (Route::Direct, "connect", "b".to_string()),
+            (Route::System, "proxy", "c".to_string()),
+            (Route::Direct, "connect", "d".to_string()),
+            (Route::Curl, "tls", "e".to_string()),
+        ];
+        assert_eq!(
+            failure_detail(&failures),
+            "试了 5 次：proxy ×2, connect ×2, tls ×1。系统网络设置：proxy: c；不走代理：connect: d；系统自带 curl：tls: e"
+        );
+        // Without a system curl the causes of the two clients stand alone.
+        assert_eq!(
+            failure_detail(&failures[..2]),
+            "试了 2 次：proxy ×1, connect ×1。系统网络设置：proxy: a；不走代理：connect: b"
+        );
+        assert_eq!(failure_detail(&[]), "");
+        assert!(unreachable_message("api.xxchun.com", &failures).starts_with("连不上 xxchun"));
+        let slow: Vec<Tried> = vec![
+            (Route::System, "timeout", "a".to_string()),
+            (Route::Curl, "timeout", "b".to_string()),
+        ];
+        assert!(unreachable_message("api.xxchun.com", &slow).starts_with("连接 xxchun"));
+        assert!(unreachable_message("api.xxchun.com", &[]).starts_with("连不上 xxchun"));
+        let message = Failure::Unreachable {
+            kind: "tls",
+            detail: "c".to_string(),
+        }
+        .into_message("api.xxchun.com", Route::Curl);
+        assert!(message.ends_with("\n试了 1 次：tls ×1。系统自带 curl：tls: c"));
+        assert_eq!(
+            Failure::Builder.into_message("api.xxchun.com", Route::System),
+            KEY_HELP
+        );
+    }
+    #[test]
+    fn the_curl_request_keeps_the_key_out_of_the_arguments_and_escapes_its_values() {
+        let key = format!("sk-xc-{}", "A1b2".repeat(8));
+        let url = "https://api.example.test/v1/models?client_version=0.162.0";
+        let config = curl_config(url, &key, 8);
+        assert_eq!(CURL_ARGS, ["-q", "--config", "-"]);
+        assert!(CURL_ARGS.iter().all(|arg| !arg.contains("sk-")));
+        assert!(config.contains(&format!("header = \"Authorization: Bearer {key}\"\n")));
+        assert!(config.contains(&format!("url = \"{url}\"\n")));
+        assert!(config.contains("write-out = \"\\n%{http_code}\"\n"));
+        for line in [
+            "silent",
+            "show-error",
+            "globoff",
+            "max-time = 8",
+            "max-filesize = 2097152",
+            "header = \"Accept: application/json\"",
+        ] {
+            assert!(config.lines().any(|found| found == line), "{line}");
+        }
+        // Redirects are not followed unless asked for.
+        assert!(!config.contains("location"));
+        assert_eq!(curl_quote("a\"b\\c\nd\u{7}"), "\"a\\\"b\\\\c\\nd\"");
+        // A value cannot end its line and start another option.
+        let hostile = curl_config("https://x.test/\"\nlocation", &key, 8);
+        assert_eq!(hostile.lines().next(), Some("url = \"https://x.test/\\\"\\nlocation\""));
+    }
+    #[test]
+    fn curl_output_is_a_body_and_a_status_line() {
+        assert_eq!(
+            parse_curl_output(b"{\"models\":[]}\n200"),
+            Some(Reply {
+                status: 200,
+                body: b"{\"models\":[]}".to_vec()
+            })
+        );
+        let two_lines = parse_curl_output(b"line one\nline two\n401").unwrap();
+        assert_eq!(two_lines.status, 401);
+        assert_eq!(two_lines.body, b"line one\nline two".to_vec());
+        assert_eq!(parse_curl_output(b"\n302").unwrap().body.len(), 0);
+        let bad: [&[u8]; 6] = [
+            b"",
+            b"200",
+            b"body\n000",
+            b"body\n20",
+            b"body\n2000",
+            b"body\nabc",
+        ];
+        for output in bad {
+            assert_eq!(parse_curl_output(output), None);
+        }
+    }
+    #[test]
+    fn a_curl_run_becomes_an_answer_or_a_sanitized_cause() {
+        let key = format!("sk-xc-{}", "A1b2".repeat(8));
+        assert_eq!(
+            curl_outcome(Some(0), b"{}\n200", b"", &key),
+            Ok(Reply {
+                status: 200,
+                body: b"{}".to_vec()
+            })
+        );
+        // An HTTP error is still an answer: it goes to the same status handling.
+        assert_eq!(curl_outcome(Some(0), b"\n401", b"", &key).unwrap().status, 401);
+        let unreachable = |kind: &'static str, detail: &str| -> Result<Reply, Failure> {
+            Err(Failure::Unreachable {
+                kind,
+                detail: detail.to_string(),
+            })
+        };
+        assert_eq!(
+            curl_outcome(Some(60), b"\n000", b"curl: (60) SSL certificate problem\r\n", &key),
+            unreachable("tls", "curl: (60) SSL certificate problem")
         );
         assert_eq!(
-            failure_detail("proxy: a", "connect: b"),
-            "按系统网络设置：proxy: a；不走代理：connect: b"
+            curl_outcome(Some(7), b"\n000", b"", &key),
+            unreachable("connect", "curl exit 7")
         );
+        assert_eq!(
+            curl_outcome(Some(28), b"", b"", &key),
+            unreachable("timeout", "curl exit 28")
+        );
+        assert_eq!(
+            curl_outcome(None, b"", b"", &key),
+            unreachable("timeout", "curl did not finish")
+        );
+        let said = format!("failed for Bearer {key}");
+        assert_eq!(
+            curl_outcome(Some(5), b"", said.as_bytes(), &key),
+            unreachable("proxy", "failed for Bearer ***")
+        );
+        assert_eq!(
+            curl_outcome(Some(63), b"", b"", &key),
+            Err(Failure::Message(TOO_LARGE))
+        );
+        let flood = vec![b'a'; BODY_LIMIT + 64];
+        assert_eq!(
+            curl_outcome(Some(23), &flood, b"", &key),
+            Err(Failure::Message(TOO_LARGE))
+        );
+    }
+    #[test]
+    fn an_answer_is_read_the_same_way_whichever_way_it_arrived() {
+        let reply = |status: u16, body: &str| Reply {
+            status,
+            body: body.as_bytes().to_vec(),
+        };
+        assert_eq!(
+            catalog_payload(&reply(200, "{\"models\":[]}")).unwrap(),
+            json!({"models":[]})
+        );
+        assert!(catalog_payload(&reply(401, "")).unwrap_err().contains("验证"));
+        assert!(catalog_payload(&reply(302, "")).unwrap_err().contains("302"));
+        assert!(catalog_payload(&reply(200, "<html>")).unwrap_err().contains("JSON"));
     }
     #[test]
     fn an_empty_catalog_names_the_key_that_is_needed() {

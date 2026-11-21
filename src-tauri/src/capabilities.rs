@@ -377,28 +377,25 @@ pub fn version_before(text: &str, minimum: (u32, u32, u32)) -> bool {
 
 /// Read-only, bounded capability discovery on the same authenticated origin.
 /// Missing/old/nonconforming endpoints never imply support and never cause paid probes.
-pub async fn discover(client: &reqwest::Client, root: &str, key: &str) -> RouteCapabilities {
-    async fn fetch(client: &reqwest::Client, root: &str, key: &str) -> Option<RouteCapabilities> {
-        let mut response = client
-            .get(format!("{root}/v1/sub2api/connect"))
-            .bearer_auth(key)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .ok()?;
-        if !response.status().is_success() {
+pub async fn discover(
+    transport: &crate::models::Transport,
+    root: &str,
+    key: &str,
+) -> RouteCapabilities {
+    async fn fetch(
+        transport: &crate::models::Transport,
+        root: &str,
+        key: &str,
+    ) -> Option<RouteCapabilities> {
+        // The same transport that reached the model catalog, with its retries and body limit.
+        let url = format!("{root}/v1/sub2api/connect");
+        let reply = transport.get_retrying(&url, key).await.ok()?;
+        if !(200..300).contains(&reply.status) {
             return None;
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.ok()? {
-            if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
-                return None;
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        parse(&serde_json::from_slice::<Value>(&bytes).ok()?)
+        parse(&serde_json::from_slice::<Value>(&reply.body).ok()?)
     }
-    fetch(client, root, key)
+    fetch(transport, root, key)
         .await
         .unwrap_or_else(|| RouteCapabilities {
             warning: Some("中转站未返回有效的线路能力验证信息，按未验证处理。".into()),

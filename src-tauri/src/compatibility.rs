@@ -408,3 +408,38 @@ mod tests {
         );
     }
 }
+
+// Opened straight from an archive viewer instead of being extracted first: the viewer
+// unpacks to a temporary folder that it deletes afterwards. Only worth a hint.
+pub fn runs_from_archive(executable: &str) -> bool {
+    let path = executable.to_lowercase().replace('/', "\\");
+    path.contains("\\temp\\")
+        && ["rar$", "\\7z", ".zip", "temp1_", "bnz.", "360zip", "haozip"]
+            .iter()
+            .any(|marker| path.contains(*marker))
+}
+
+#[cfg(test)]
+mod archive_tests {
+    #[test]
+    fn an_exe_opened_inside_an_archive_viewer_is_recognised_by_its_temporary_path() {
+        for path in [
+            "C:\\Users\\a\\AppData\\Local\\Temp\\Rar$EXa1234.5678\\xxchun Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\7zO4A1B2C3D\\xxchun Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\Temp1_xxchun-Connect-0.1.3-Windows-x64-portable.zip\\xxchun Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\BNZ.65a1b2c3\\xxchun Connect.exe",
+            "C:/Users/a/AppData/Local/Temp/360zip$Temp/xxchun Connect.exe",
+        ] {
+            assert!(super::runs_from_archive(path), "{path}");
+        }
+        for path in [
+            "C:\\Users\\a\\Desktop\\xxchun-Connect-0.1.3-Windows-x64-portable\\xxchun Connect.exe",
+            "D:\\tools\\7zip\\xxchun Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\build\\xxchun Connect.exe",
+            "/Applications/xxchun Connect.app/Contents/MacOS/xxchun-connect",
+            "",
+        ] {
+            assert!(!super::runs_from_archive(path), "{path}");
+        }
+    }
+}

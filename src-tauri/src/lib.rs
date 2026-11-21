@@ -56,6 +56,8 @@ mod desktop {
     #[derive(Serialize)]
     struct Status {
         sandbox: bool,
+        // Started from inside an archive viewer; the window shows a hint, nothing more.
+        unextracted: bool,
         clients: Vec<ClientStatus>,
     }
 
@@ -64,6 +66,9 @@ mod desktop {
         let paths = state.paths.clone();
         tauri::async_runtime::spawn_blocking(move || Status {
             sandbox: paths.sandbox,
+            unextracted: std::env::current_exe()
+                .ok()
+                .is_some_and(|path| compatibility::runs_from_archive(&path.to_string_lossy())),
             clients: models::Client::ALL
                 .into_iter()
                 .map(|client| {

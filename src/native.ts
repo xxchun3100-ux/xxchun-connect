@@ -20,6 +20,7 @@ export interface ClientStatus {
 }
 export interface Status {
   sandbox: boolean;
+  unextracted?: boolean;
   clients: ClientStatus[];
 }
 export interface ImportResult {
@@ -45,6 +46,7 @@ export interface DiscoveryResult {
   client: Client;
   baseUrl: string;
   models: ModelChoice[];
+  viaSystemNetwork?: boolean;
   capabilities?: { models: Record<string, { messages: { status: CapabilityState }; claude_tool_search: { status: CapabilityState } }> };
 }
 export function discoverModels(input: {
