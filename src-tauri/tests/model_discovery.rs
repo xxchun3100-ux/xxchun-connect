@@ -197,6 +197,28 @@ async fn bad_keys_and_redirects_return_redacted_errors() {
     }
 }
 
+#[tokio::test]
+async fn a_key_without_models_for_this_client_is_told_which_key_to_copy() {
+    let (root, server) = server("200 OK", "", r#"{"models":[]}"#);
+    let error = models::discover(request(root)).await.err().unwrap();
+    assert!(error.contains("只能用 Claude 的模型"));
+    assert!(error.contains("复制 Codex 的密钥"));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn an_unreachable_api_is_retried_without_a_proxy_and_explains_itself() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let root = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let error = models::discover(request(root)).await.err().unwrap();
+    let (advice, detail) = error.split_once('\n').unwrap();
+    assert!(advice.contains("xxchun（127.0.0.1）"));
+    assert!(advice.contains("请关掉代理/VPN 再试一次"));
+    assert!(detail.contains("不走代理"));
+    assert!(!error.contains("sk-test") && !error.contains("client_version"));
+}
+
 fn discovered(client: Client) -> models::DiscoveredModels {
     models::DiscoveredModels {
         capabilities: Default::default(),

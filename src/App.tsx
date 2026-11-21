@@ -7,7 +7,7 @@ import { Check, CircleAlert, ClipboardPaste, Eye, EyeOff, KeyRound, LoaderCircle
 import { discoverModels, importConfig, nativeAvailable, previewConfig, readStatus, type Client, type ImportResult, type SelectionInput, type Status } from "./native";
 import { DEFAULT_STATION, stationAddress } from "./stations";
 import { clients, clientFamily } from "./clients";
-import { looksLikeKey, pickModels } from "./quick";
+import { looksLikeKey, pickModels, splitError, wrongKeyMessage } from "./quick";
 import RestorePanel from "./RestorePanel";
 import { DEFAULT_OPTIONS, selectedOptions } from "./setup-options";
 import { version } from "../package.json";
@@ -46,6 +46,7 @@ export default function App() {
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState<Client | null>(null);
   const [error, setError] = useState("");
+  const [retry, setRetry] = useState<Client | null>(null);
   const [hint, setHint] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
@@ -70,7 +71,7 @@ export default function App() {
   // 「粘贴」: the key copied on the shop's page. Where the system does not let the app read the clipboard, the field
   // is focused and the person presses Ctrl+V / ⌘V themselves.
   async function paste() {
-    setError(""); setHint("");
+    setHint("");
     try {
       const text = (await navigator.clipboard.readText()).trim();
       if (!text) { setHint("剪贴板是空的。先到网站点「复制我的密钥」。"); field.current?.focus(); return; }
@@ -80,20 +81,20 @@ export default function App() {
   }
   async function connect(client: Client) {
     if (disabled || !ready) return;
-    setError(""); setHint(""); setResult(null); setRestored(false);
+    setError(""); setRetry(null); setHint(""); setResult(null); setRestored(false);
     if (!nativeAvailable) { setError("这是界面预览，要在 xxchun Connect 应用里才能接入。"); return; }
     setBusy(client);
     try {
       const found = await discoverModels({ client, baseUrl: DEFAULT_STATION.baseUrl, apiKey: apiKey.trim() });
       const chosen = pickModels(client, found.models.map((model) => model.id).filter((id) => clientFamily(client) === "codex" || found.capabilities?.models[id]?.messages.status !== "unsupported"));
-      if (!chosen.ids.length) { setError(`这把密钥不能用在 ${shortName(client)} 上。回到网站的 ${shortName(client)} 接入教程，点「复制我的密钥」，再粘贴到这里。`); return; }
+      if (!chosen.ids.length) { setError(wrongKeyMessage(client)); return; }
       const input: SelectionInput = { discoveryId: found.discoveryId, selectedModels: chosen.ids, defaultModel: chosen.defaultId, toolSearch: "auto", options: selectedOptions(client, chosen.ids, DEFAULT_OPTIONS) };
       const preview = await previewConfig(input);
       if (preview.blocked) { setError(preview.blocked); return; }
       setResult(await importConfig(input));
       try { await refresh(); } catch { /* the import itself is done */ }
     } catch (reason) {
-      setError(typeof reason === "string" ? reason : "没接上，请稍后再试。");
+      setError(typeof reason === "string" ? reason : "没接上，请稍后再试。"); setRetry(client);
     } finally { setBusy(null); }
   }
   const target = (client: Client, big: boolean) => {
@@ -108,6 +109,7 @@ export default function App() {
     );
   };
   const done = result ? clients.find((item) => item.id === result.client)! : null;
+  const shown = splitError(error);
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -141,7 +143,7 @@ export default function App() {
               <label className="field-label" htmlFor="api-key">密钥</label>
               <div className="secret-field">
                 <KeyRound size={18} />
-                <input id="api-key" name="api-key" ref={field} type={visible ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setError(""); setHint(""); }} placeholder="sk-xc-…" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={4096} disabled={disabled} aria-describedby="key-destination" />
+                <input id="api-key" name="api-key" ref={field} type={visible ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setHint(""); }} placeholder="sk-xc-…" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={4096} disabled={disabled} aria-describedby="key-destination" />
                 <button type="button" className="icon-button" aria-label={visible ? "隐藏密钥" : "显示密钥"} aria-pressed={visible} onClick={() => setVisible(!visible)} disabled={disabled}>{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button>
               </div>
               <p id="key-destination" className="key-destination"><LockKeyhole size={13} /><span>密钥只发给 <b>{stationAddress(DEFAULT_STATION)}</b>，并写进你电脑上的配置</span></p>
@@ -154,7 +156,14 @@ export default function App() {
           {(error || pending || restored) && (
             <div className="feedback-area">
               {pending && <div className="notice notice-error" role="alert"><CircleAlert size={16} /><p>上次接入被中断了，请先点右上角「恢复原配置」。</p></div>}
-              {error && <div className="notice notice-error" role="alert"><CircleAlert size={16} /><p>{error}</p><button className="icon-button" aria-label="关闭提示" onClick={() => setError("")}><X size={15} /></button></div>}
+              {error && (
+                <div className="notice notice-error xc-error" role="alert"><CircleAlert size={16} />
+                  <div className="xc-error-body"><p>{shown.message}</p>
+                    {shown.detail && <p className="xc-error-detail">{shown.detail}</p>}
+                    {retry && <button type="button" className="xc-retry" disabled={disabled || !ready} onClick={() => void connect(retry)}>{busy === retry ? "正在重试…" : "再试一次"}</button>}</div>
+                  <button className="icon-button" aria-label="关闭提示" onClick={() => { setError(""); setRetry(null); }}><X size={15} /></button>
+                </div>
+              )}
               {restored && !error && <div className="notice" role="status"><Check size={16} /><p>已经恢复成接入之前的配置。完全退出那个程序再打开，它会回到官方登录。</p></div>}
             </div>
           )}

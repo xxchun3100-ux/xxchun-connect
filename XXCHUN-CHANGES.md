@@ -1,6 +1,6 @@
 # xxchun Connect：相对上游改了什么
 
-上游：https://github.com/superpilot69/supergpt-connect ，tag `v0.1.6`（提交 65c260e）。本分支版本 0.1.0。改动没有提交，都在工作区里。
+上游：https://github.com/superpilot69/supergpt-connect ，tag `v0.1.6`（提交 65c260e）。本分支版本 0.1.1。
 
 ## 没有在这台机器上验证的
 
@@ -47,4 +47,22 @@
 
 - **预填密钥（自定义网址协议 / 一次性码）没做。** 两种都要新的 Rust 代码：协议要加 tauri 的 deep-link 插件并改 `Cargo.lock`，一次性码要在 Rust 里加一次网络请求（界面的 CSP 不允许网页自己联网）。这里编译不了，不敢盲写。现在的办法是：网站上点「复制我的密钥」，应用里点「粘贴密钥」（只接受长得像密钥的内容）。
 - **重启客户端的按钮没有。** 上游没有这个功能，也没有打开网页的插件；结果页只写「完全退出再打开」，网站地址是写出来的字，不是链接。
-- 商城的密钥是按工具分的（Claude 的密钥读不到 GPT 模型）。拿 Claude 的密钥点「接到 Codex」会得到一句提示，让他回网站复制 Codex 的密钥。
+- 商城的密钥是按工具分的（Claude 的密钥读不到 GPT 模型）。拿 Claude 的密钥点「接到 Codex」会得到一句提示，让他回教程页复制 Codex 的密钥（0.1.1 起服务器返回空目录时也是这一句，见下）。
+
+## 0.1.1（2026-11-21）
+
+起因：一位 Windows 用户开着本机代理工具（系统代理 127.0.0.1:7897），密钥是对的，却看到「无法连接 API，请检查网络、证书和 API 地址。」。服务器对同一请求是 200，问题在当时的本机网络环境，而应用把原因藏起来了。
+
+这一版**第一次改了 Rust 的逻辑**（之前只有机械改名），同样没有在这台机器上编译过，要看 GitHub Actions。
+
+- `src-tauri/src/models.rs`：
+  - 读取 `/v1/models` 的请求发不出去（不是 HTTP 状态码的那类错误，包括超时）时，用一个 `.no_proxy()` 的连接再试一次；成功了，这次接入后面的请求（Codex 的无参数回退、Claude 的能力探测）也用这个不走代理的连接。两次都失败才报错。最坏情况要等两个 15 秒。
+  - 报错是两行：第一行给人看，「连不上 xxchun（api.xxchun.com）。请关掉代理/VPN 再试一次，或换个网络。」，超时是「连接 xxchun（api.xxchun.com）超时了。…」；第二行是技术原因：类别（`request-build` / `timeout` / `proxy` / `dns` / `tls` / `connect` / `request`）加错误链，两次的原因都写上。错误链里的密钥、`Bearer` 后面的内容、任何 `sk-` 开头的串、网址的查询参数和账号密码都会去掉，最长 300 字。类别里 proxy / dns / tls 是按错误文字里的关键词猜的（reqwest 不提供这些判断）。
+  - 目录为空（服务器 200 但没有模型）：接 Codex 时说「这把密钥只能用 Claude 的模型，接 Codex 请回教程页复制 Codex 的密钥。」，接 Claude 时反过来。以前是「密钥返回的模型目录为空…」。两种情况都不会写配置（以前也不会）。
+  - 新增单元测试 `connection_tests`（清理、分类、文案、空目录），`src-tauri/tests/model_discovery.rs` 加了两个：空目录、连不上的端口。
+- `src/quick.ts`：`wrongKeyMessage`（目录不为空但没有这个工具能用的模型时，界面说同一句话）、`splitError`（把报错拆成正文和小字原因）。`tests/quick.test.ts` 各加一个测试。
+- `src/App.tsx`、`src/styles.css`：报错框显示小字原因和「再试一次」（接入失败时才有，重试的是刚才那个工具）；改密钥或点「粘贴」不再把报错清掉，只有点关闭或重新接入才消失。
+- 版本 0.1.1：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`（只改根包版本，没有加任何依赖或特性）。`CHANGELOG.md` 顶上加了本分支的一节。
+- 删除 `.github/workflows/diag.yml`（临时的连通性诊断）。
+
+没有验证的：Rust 没编译过；没有在真的坏代理环境下试过重试；重试只管「读取模型」这一步，客户端自己之后走不走代理不归这个应用管。

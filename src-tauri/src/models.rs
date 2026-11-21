@@ -203,6 +203,188 @@ pub fn catalog_models(payload: &Value) -> Vec<String> {
     models
 }
 
+// Match the catalog protocol exercised by verify-codex-runtime.py. A plain
+// model list can contain names only, omitting image and reasoning capabilities.
+const CODEX_CATALOG_CLIENT_VERSION: &str = "0.162.0";
+
+fn http_client(direct: bool) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none());
+    if direct {
+        builder = builder.no_proxy();
+    }
+    builder
+        .build()
+        .map_err(|_| "无法初始化网络连接。".to_string())
+}
+
+async fn fetch_catalog(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    codex_manifest: bool,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut request = client
+        .get(endpoint)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json");
+    if codex_manifest {
+        request = request.query(&[("client_version", CODEX_CATALOG_CLIENT_VERSION)]);
+    }
+    request.send().await
+}
+
+// The first line is for the person; the line after it is the technical cause, shown small.
+fn connection_message(host: &str, timed_out: bool, detail: &str) -> String {
+    let advice = if timed_out {
+        format!("连接 xxchun（{host}）超时了。请关掉代理/VPN 再试一次，或换个网络。")
+    } else {
+        format!("连不上 xxchun（{host}）。请关掉代理/VPN 再试一次，或换个网络。")
+    };
+    if detail.is_empty() {
+        advice
+    } else {
+        format!("{advice}\n{detail}")
+    }
+}
+
+fn empty_catalog_message(client: Client) -> &'static str {
+    if client.is_codex() {
+        "这把密钥只能用 Claude 的模型，接 Codex 请回教程页复制 Codex 的密钥。"
+    } else {
+        "这把密钥只能用 Codex 的模型，接 Claude 请回教程页复制 Claude 的密钥。"
+    }
+}
+
+fn failure_detail(first: &str, direct: &str) -> String {
+    if first == direct {
+        format!("{first}（不走代理再试，结果一样）")
+    } else {
+        format!("按系统网络设置：{first}；不走代理：{direct}")
+    }
+}
+
+fn describe_error(error: &reqwest::Error, api_key: &str) -> String {
+    let chain = error_chain(error);
+    let kind = cause_kind(
+        error.is_timeout(),
+        error.is_connect(),
+        error.is_builder(),
+        &chain,
+    );
+    format!("{kind}: {}", sanitize_cause(&chain, api_key))
+}
+
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(" | ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
+fn cause_kind(timeout: bool, connect: bool, builder: bool, chain: &str) -> &'static str {
+    fn has(text: &str, words: &[&str]) -> bool {
+        words.iter().any(|word| text.contains(*word))
+    }
+    let text = chain.to_ascii_lowercase();
+    if builder {
+        "request-build"
+    } else if timeout {
+        "timeout"
+    } else if has(&text, &["proxy", "tunnel", "socks"]) {
+        "proxy"
+    } else if has(&text, &["dns", "lookup address", "no such host"]) {
+        "dns"
+    } else if has(&text, &["certificate", "tls", "handshake"]) {
+        "tls"
+    } else if connect {
+        "connect"
+    } else {
+        "request"
+    }
+}
+
+// What may be shown or pasted into a support chat: no key, no URL query, no URL credentials.
+fn sanitize_cause(text: &str, api_key: &str) -> String {
+    fn strip_url(word: &str) -> String {
+        let Some(scheme) = word.find("://") else {
+            return word.to_string();
+        };
+        let (head, rest) = word.split_at(scheme + 3);
+        let authority = rest
+            .find(|c: char| matches!(c, '/' | '?' | '#'))
+            .unwrap_or(rest.len());
+        let rest = match rest[..authority].rfind('@') {
+            Some(at) => &rest[at + 1..],
+            None => rest,
+        };
+        let Some(query) = rest.find(|c: char| matches!(c, '?' | '#')) else {
+            return format!("{head}{rest}");
+        };
+        // Keep the bracket or full stop that closed the URL in the sentence.
+        let closing = rest
+            .trim_end_matches(|c: char| matches!(c, ')' | ']' | '"' | '>' | '.' | ',' | ';' | ':'))
+            .len()
+            .max(query);
+        format!("{head}{}{}", &rest[..query], &rest[closing..])
+    }
+    fn mask_keys(word: &str) -> String {
+        let mut out = String::new();
+        let mut rest = word;
+        while let Some(start) = rest.find("sk-") {
+            let tail = &rest[start..];
+            let inside_word = rest[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric());
+            let len = if inside_word {
+                3
+            } else {
+                tail.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                    .unwrap_or(tail.len())
+            };
+            out.push_str(&rest[..start]);
+            out.push_str(if inside_word { "sk-" } else { "***" });
+            rest = &tail[len..];
+        }
+        out.push_str(rest);
+        out
+    }
+    let text = if api_key.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(api_key, "***")
+    };
+    let mut words = Vec::new();
+    let mut after_bearer = false;
+    for word in text.split_whitespace() {
+        let clean = if after_bearer {
+            "***".to_string()
+        } else {
+            mask_keys(&strip_url(word))
+        };
+        after_bearer = word.eq_ignore_ascii_case("bearer");
+        words.push(clean);
+    }
+    let clean: String = words
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    if clean.chars().count() > 300 {
+        let mut short: String = clean.chars().take(300).collect();
+        short.push('…');
+        short
+    } else {
+        clean
+    }
+}
+
 pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String> {
     let api_key = input.api_key.trim().to_string();
     if api_key.is_empty()
@@ -213,40 +395,44 @@ pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String>
         return Err("请粘贴完整的 API 密钥，密钥中不能包含空格或换行。".into());
     }
     let root = normalize_root(&input.base_url)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "无法初始化网络连接。")?;
-    // Match the catalog protocol exercised by verify-codex-runtime.py. A plain
-    // model list can contain names only, omitting image and reasoning capabilities.
-    const CODEX_CATALOG_CLIENT_VERSION: &str = "0.162.0";
+    let host = reqwest::Url::parse(&root)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| root.clone());
+    let mut client = http_client(false)?;
     let endpoint = format!("{root}/v1/models");
-    let fetch = |codex_manifest: bool| {
-        let mut request = client
-            .get(&endpoint)
-            .bearer_auth(&api_key)
-            .header("Accept", "application/json");
-        if codex_manifest {
-            request = request.query(&[("client_version", CODEX_CATALOG_CLIENT_VERSION)]);
-        }
-        // Credentials stay on this exact origin; redirects and bodies are never echoed.
-        async move {
-            request.send().await.map_err(|error| {
-                if error.is_timeout() {
-                    "连接超时，请检查网络和 API 地址。"
-                } else {
-                    "无法连接 API，请检查网络、证书和 API 地址。"
+    let codex = input.client.is_codex();
+    // Credentials stay on this exact origin; redirects and bodies are never echoed.
+    let attempt = fetch_catalog(&client, &endpoint, &api_key, codex).await;
+    let mut response = match attempt {
+        Ok(response) => response,
+        Err(first) => {
+            // A system proxy that is switched on but not answering is the usual reason a
+            // reachable API cannot be reached. Try once more without any proxy, and keep
+            // that direct client for the rest of this discovery when it works.
+            client = http_client(true)?;
+            let direct = fetch_catalog(&client, &endpoint, &api_key, codex).await;
+            match direct {
+                Ok(response) => response,
+                Err(second) => {
+                    let detail = failure_detail(
+                        &describe_error(&first, &api_key),
+                        &describe_error(&second, &api_key),
+                    );
+                    return Err(connection_message(&host, second.is_timeout(), &detail));
                 }
-                .to_string()
-            })
+            }
         }
     };
-    let mut response = fetch(input.client.is_codex()).await?;
-    if input.client.is_codex() && matches!(response.status().as_u16(), 400 | 404 | 405 | 422) {
+    if codex && matches!(response.status().as_u16(), 400 | 404 | 405 | 422) {
         // Some third-party gateways reject query parameters. Fall back once,
         // but never retry authentication, rate-limit, redirect, or server errors.
-        response = fetch(false).await?;
+        response = fetch_catalog(&client, &endpoint, &api_key, false)
+            .await
+            .map_err(|error| {
+                let detail = describe_error(&error, &api_key);
+                connection_message(&host, error.is_timeout(), &detail)
+            })?;
     }
     if !response.status().is_success() {
         return Err(match response.status().as_u16() {
@@ -279,7 +465,7 @@ pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String>
     };
     let models = catalog_models(&payload);
     if models.is_empty() {
-        return Err("密钥返回的模型目录为空，请检查分组是否有可用模型。".into());
+        return Err(empty_catalog_message(input.client).into());
     }
     let rows = payload
         .get("data")
@@ -585,5 +771,78 @@ mod session_tests {
         assert!(session.prepare(&input).is_ok());
         session.created = Instant::now() - Duration::from_secs(901);
         assert!(session.prepare(&input).is_err());
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn causes_are_shown_without_the_key_the_query_or_url_credentials() {
+        let key = "sk-test-not-a-real-key";
+        let clean = sanitize_cause(
+            "error sending request for url (https://user:pass@api.example.test/v1/models?client_version=0.162.0&key=sk-test-not-a-real-key) | client error (Connect)\n| tcp connect error:\tAuthorization: Bearer sk-test-not-a-real-key refused",
+            key,
+        );
+        assert_eq!(
+            clean,
+            "error sending request for url (https://api.example.test/v1/models) | client error (Connect) | tcp connect error: Authorization: Bearer *** refused"
+        );
+        // A different key that somehow appears in a cause is masked as well.
+        assert_eq!(
+            sanitize_cause("token sk-other_KEY-0123456789, task-queue kept", key),
+            "token ***, task-queue kept"
+        );
+        assert_eq!(
+            sanitize_cause("http://127.0.0.1:7897/#frag. next", ""),
+            "http://127.0.0.1:7897/. next"
+        );
+        let long = sanitize_cause(&"连".repeat(400), key);
+        assert_eq!(long.chars().count(), 301);
+        assert!(long.ends_with('…'));
+    }
+    #[test]
+    fn causes_are_named_by_kind() {
+        for (timeout, connect, builder, chain, kind) in [
+            (false, false, true, "builder error", "request-build"),
+            (true, true, false, "operation timed out", "timeout"),
+            (false, true, false, "client error (Connect) | proxy connect failed", "proxy"),
+            (false, true, false, "dns error | No such host is known", "dns"),
+            (false, true, false, "invalid peer certificate: UnknownIssuer", "tls"),
+            (false, true, false, "tcp connect error | os error 10061", "connect"),
+            (false, false, false, "connection closed before message completed", "request"),
+        ] {
+            assert_eq!(cause_kind(timeout, connect, builder, chain), kind, "{chain}");
+        }
+    }
+    #[test]
+    fn connection_failures_say_what_to_do_and_keep_the_cause_on_its_own_line() {
+        assert_eq!(
+            connection_message("api.xxchun.com", false, "connect: refused"),
+            "连不上 xxchun（api.xxchun.com）。请关掉代理/VPN 再试一次，或换个网络。\nconnect: refused"
+        );
+        let timeout = connection_message("api.xxchun.com", true, "");
+        assert!(timeout.contains("超时") && !timeout.contains('\n'));
+        assert_eq!(
+            failure_detail("connect: a", "connect: a"),
+            "connect: a（不走代理再试，结果一样）"
+        );
+        assert_eq!(
+            failure_detail("proxy: a", "connect: b"),
+            "按系统网络设置：proxy: a；不走代理：connect: b"
+        );
+    }
+    #[test]
+    fn an_empty_catalog_names_the_key_that_is_needed() {
+        for client in Client::ALL {
+            let (has, wants) = if client.is_codex() {
+                ("Claude", "Codex")
+            } else {
+                ("Codex", "Claude")
+            };
+            let message = empty_catalog_message(client);
+            assert!(message.contains(&format!("只能用 {has} 的模型")));
+            assert!(message.contains(&format!("复制 {wants} 的密钥")));
+        }
     }
 }
