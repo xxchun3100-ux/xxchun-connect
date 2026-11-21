@@ -7,7 +7,7 @@ import { Check, CircleAlert, ClipboardPaste, Eye, EyeOff, KeyRound, LoaderCircle
 import { discoverModels, importConfig, nativeAvailable, previewConfig, readStatus, type Client, type ImportResult, type SelectionInput, type Status } from "./native";
 import { DEFAULT_STATION, stationAddress } from "./stations";
 import { clients, clientFamily } from "./clients";
-import { looksLikeKey, pickModels, splitError, wrongKeyMessage } from "./quick";
+import { cleanKey, keyConfirmation, keyProblem, pickModels, splitError, wrongKeyMessage } from "./quick";
 import RestorePanel from "./RestorePanel";
 import { DEFAULT_OPTIONS, selectedOptions } from "./setup-options";
 import { version } from "../package.json";
@@ -15,6 +15,7 @@ import { version } from "../package.json";
 export const SHOP_KEY_PAGE = "xxchun.com/account?tab=api";
 const MAIN: Client[] = ["claude-desktop", "codex-desktop"];
 const MORE: Client[] = ["claude", "claude-vscode", "codex"];
+const PASTE_TIP = "在下面的框里点一下，按 Ctrl+V（Mac 按 ⌘V）粘贴。";
 const shortName = (client: Client) => (clientFamily(client) === "codex" ? "Codex" : "Claude");
 function BrandIcon() {
   return <img className="brand-icon" src="/xxchun.png" alt="" draggable={false} />;
@@ -75,17 +76,21 @@ export default function App() {
     try {
       const text = (await navigator.clipboard.readText()).trim();
       if (!text) { setHint("剪贴板是空的。先到网站点「复制我的密钥」。"); field.current?.focus(); return; }
-      if (!looksLikeKey(text)) { setHint("剪贴板里的不像密钥。先到网站点「复制我的密钥」，再回来点「粘贴」。"); field.current?.focus(); return; }
-      setApiKey(text); setResult(null); setRestored(false);
-    } catch { setHint("在下面的框里点一下，按 Ctrl+V（Mac 按 ⌘V）粘贴。"); field.current?.focus(); }
+      const problem = keyProblem(text);
+      if (problem) { setHint(problem); return; }
+      setApiKey(cleanKey(text)); setResult(null); setRestored(false);
+    } catch { setHint(PASTE_TIP); field.current?.focus(); }
   }
   async function connect(client: Client) {
     if (disabled || !ready) return;
+    // Nothing is sent until the text has the shape of a key (the native side checks again).
+    const problem = keyProblem(apiKey);
+    if (problem) { setHint(problem); field.current?.focus(); return; }
     setError(""); setRetry(null); setHint(""); setResult(null); setRestored(false);
     if (!nativeAvailable) { setError("这是界面预览，要在 xxchun Connect 应用里才能接入。"); return; }
     setBusy(client);
     try {
-      const found = await discoverModels({ client, baseUrl: DEFAULT_STATION.baseUrl, apiKey: apiKey.trim() });
+      const found = await discoverModels({ client, baseUrl: DEFAULT_STATION.baseUrl, apiKey: cleanKey(apiKey) });
       const chosen = pickModels(client, found.models.map((model) => model.id).filter((id) => clientFamily(client) === "codex" || found.capabilities?.models[id]?.messages.status !== "unsupported"));
       if (!chosen.ids.length) { setError(wrongKeyMessage(client)); return; }
       const input: SelectionInput = { discoveryId: found.discoveryId, selectedModels: chosen.ids, defaultModel: chosen.defaultId, toolSearch: "auto", options: selectedOptions(client, chosen.ids, DEFAULT_OPTIONS) };
@@ -147,7 +152,8 @@ export default function App() {
                 <button type="button" className="icon-button" aria-label={visible ? "隐藏密钥" : "显示密钥"} aria-pressed={visible} onClick={() => setVisible(!visible)} disabled={disabled}>{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button>
               </div>
               <p id="key-destination" className="key-destination"><LockKeyhole size={13} /><span>密钥只发给 <b>{stationAddress(DEFAULT_STATION)}</b>，并写进你电脑上的配置</span></p>
-              {hint && <p className="xc-hint" role="status">{hint}</p>}
+              {hint ? <p className={hint === PASTE_TIP ? "xc-hint" : "xc-hint xc-hint-bad"} role={hint === PASTE_TIP ? "status" : "alert"}>{hint}</p>
+                : keyConfirmation(apiKey) && <p className="xc-hint xc-key-ok" role="status"><Check size={14} />{keyConfirmation(apiKey)}</p>}
               <div className="xc-targets">{MAIN.map((client) => target(client, true))}</div>
               <button type="button" className="text-button xc-more-open" aria-expanded={more} onClick={() => setMore(!more)}>{more ? "收起" : "更多：Claude Code、VS Code、终端里的 Codex"}</button>
               {more && <div className="xc-targets xc-targets-more">{MORE.map((client) => target(client, false))}</div>}

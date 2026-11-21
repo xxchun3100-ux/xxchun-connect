@@ -251,9 +251,36 @@ fn connection_message(host: &str, timed_out: bool, detail: &str) -> String {
 
 fn empty_catalog_message(client: Client) -> &'static str {
     if client.is_codex() {
-        "这把密钥只能用 Claude 的模型，接 Codex 请回教程页复制 Codex 的密钥。"
+        "这把密钥用不了 Codex 的模型。回教程页重新点一次『复制我的密钥』。"
     } else {
-        "这把密钥只能用 Codex 的模型，接 Claude 请回教程页复制 Claude 的密钥。"
+        "这把密钥用不了 Claude 的模型。回教程页重新点一次『复制我的密钥』。"
+    }
+}
+
+const KEY_HELP: &str =
+    "这不是完整的密钥。回到 xxchun 的接入教程，点『复制我的密钥』，再回来点『粘贴密钥』。";
+const KEY_MASKED: &str = "你复制的是打了码的密钥（中间是点），不能用。";
+
+// Spaces and quotes around a key come from copying it; they are not part of it.
+pub fn normalize_key(input: &str) -> &str {
+    input.trim_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’')
+    })
+}
+
+// A key of this shop is exactly sk-xc- and 32 letters or digits. Anything else is answered
+// here, before any request: the masked form shown in lists cannot even be sent as a header.
+pub fn key_problem(input: &str) -> Option<String> {
+    let key = normalize_key(input);
+    let valid = key
+        .strip_prefix("sk-xc-")
+        .is_some_and(|rest| rest.len() == 32 && rest.chars().all(|c| c.is_ascii_alphanumeric()));
+    if valid {
+        None
+    } else if key.chars().any(|c| matches!(c, '·' | '•' | '…' | '*')) {
+        Some(format!("{KEY_MASKED}{KEY_HELP}"))
+    } else {
+        Some(KEY_HELP.to_string())
     }
 }
 
@@ -386,14 +413,11 @@ fn sanitize_cause(text: &str, api_key: &str) -> String {
 }
 
 pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String> {
-    let api_key = input.api_key.trim().to_string();
-    if api_key.is_empty()
-        || api_key.len() > 4096
-        || api_key.chars().any(char::is_whitespace)
-        || api_key.chars().any(char::is_control)
-    {
-        return Err("请粘贴完整的 API 密钥，密钥中不能包含空格或换行。".into());
+    // Nothing is sent anywhere until the text has the shape of a key.
+    if let Some(problem) = key_problem(&input.api_key) {
+        return Err(problem);
     }
+    let api_key = normalize_key(&input.api_key).to_string();
     let root = normalize_root(&input.base_url)?;
     let host = reqwest::Url::parse(&root)
         .ok()
@@ -406,6 +430,8 @@ pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String>
     let attempt = fetch_catalog(&client, &endpoint, &api_key, codex).await;
     let mut response = match attempt {
         Ok(response) => response,
+        // The request could not even be put together: that is the pasted text, not the network.
+        Err(first) if first.is_builder() => return Err(KEY_HELP.into()),
         Err(first) => {
             // A system proxy that is switched on but not answering is the usual reason a
             // reachable API cannot be reached. Try once more without any proxy, and keep
@@ -430,6 +456,9 @@ pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String>
         response = fetch_catalog(&client, &endpoint, &api_key, false)
             .await
             .map_err(|error| {
+                if error.is_builder() {
+                    return KEY_HELP.to_string();
+                }
                 let detail = describe_error(&error, &api_key);
                 connection_message(&host, error.is_timeout(), &detail)
             })?;
@@ -835,14 +864,44 @@ mod connection_tests {
     #[test]
     fn an_empty_catalog_names_the_key_that_is_needed() {
         for client in Client::ALL {
-            let (has, wants) = if client.is_codex() {
-                ("Claude", "Codex")
-            } else {
-                ("Codex", "Claude")
-            };
+            let wants = if client.is_codex() { "Codex" } else { "Claude" };
             let message = empty_catalog_message(client);
-            assert!(message.contains(&format!("只能用 {has} 的模型")));
-            assert!(message.contains(&format!("复制 {wants} 的密钥")));
+            assert!(message.contains(&format!("用不了 {wants} 的模型")));
+            assert!(message.contains("重新点一次『复制我的密钥』"));
+        }
+    }
+    #[test]
+    fn only_a_complete_shop_key_passes_and_a_masked_one_is_named() {
+        let key = format!("sk-xc-{}", "A1b2".repeat(8));
+        let short = &key[..key.len() - 1];
+        let long = format!("{key}0");
+        let underscored = format!("sk-xc-{}", "A1b_".repeat(8));
+        let prefixed = format!("Bearer {key}");
+        assert_eq!(key_problem(&key), None);
+        assert_eq!(key_problem(&format!("  \"{key}\"\r\n")), None);
+        assert_eq!(normalize_key(&format!(" “{key}” ")), key);
+        for text in [
+            "",
+            "hello",
+            "sk-xc-short",
+            "sk-test-not-a-real-key",
+            "https://xxchun.com/account?tab=api",
+            short,
+            long.as_str(),
+            underscored.as_str(),
+            prefixed.as_str(),
+        ] {
+            assert_eq!(key_problem(text).as_deref(), Some(KEY_HELP), "{text}");
+        }
+        for text in [
+            "sk-xc-····xT4d",
+            "sk-xc-••••xT4d",
+            "sk-xc-…xT4d",
+            "sk-xc-****xT4d",
+        ] {
+            let problem = key_problem(text).unwrap();
+            assert!(problem.starts_with(KEY_MASKED), "{text}");
+            assert!(problem.ends_with(KEY_HELP), "{text}");
         }
     }
 }

@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.162.0"
-FAKE_KEY = "sk-connect-fixture-only"
+FAKE_KEY = "sk-xc-connectFixtureOnly00000000000000"
 IMAGE_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMIM/4EAAB/uBfsL2WiLAAAAAElFTkSuQmCC"
 PROFILES = json.loads((ROOT / "src-tauri/src/resources/codex_model_profiles.json").read_text())
 

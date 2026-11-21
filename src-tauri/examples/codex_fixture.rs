@@ -43,7 +43,7 @@ async fn main() -> Result<(), String> {
     } else {
         let discovered = models::discover(models::DiscoveryInput {
             client: spec.client,
-            api_key: "sk-connect-fixture-only".into(),
+            api_key: "sk-xc-connectFixtureOnly00000000000000".into(),
             base_url: spec.root,
         })
         .await?;

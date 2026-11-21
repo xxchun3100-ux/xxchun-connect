@@ -49,7 +49,7 @@ fn server(status: &str, headers: &str, body: &str) -> (String, std::thread::Join
 fn request(root: String) -> DiscoveryInput {
     DiscoveryInput {
         client: Client::Codex,
-        api_key: "sk-test-not-a-real-key".into(),
+        api_key: "sk-xc-testnotarealkey00000000000000000".into(),
         base_url: root,
     }
 }
@@ -60,12 +60,12 @@ async fn discovery_authenticates_to_models_without_paid_inference() {
     let data = models::discover(request(root)).await.unwrap();
     assert_eq!(data.choices[0].id, "gpt-test-codex");
     let safe = serde_json::to_string(&models::DiscoverySession::new(data).response()).unwrap();
-    assert!(!safe.contains("sk-test-not-a-real-key"));
+    assert!(!safe.contains("sk-xc-testnotarealkey00000000000000000"));
     let received = server.join().unwrap();
     assert!(received.starts_with("GET /v1/models?client_version="));
     assert!(received
         .to_lowercase()
-        .contains("authorization: bearer sk-test-not-a-real-key"));
+        .contains("authorization: bearer sk-xc-testnotarealkey00000000000000000"));
 }
 
 // Reproduce the production gateway: the ordinary list contains names only,
@@ -189,9 +189,9 @@ async fn bad_keys_and_redirects_return_redacted_errors() {
             "Location: http://127.0.0.1:9/must-not-receive-key\r\n",
         ),
     ] {
-        let (root, server) = server(status, headers, r#"{"echo":"sk-test-not-a-real-key"}"#);
+        let (root, server) = server(status, headers, r#"{"echo":"sk-xc-testnotarealkey00000000000000000"}"#);
         let error = models::discover(request(root)).await.err().unwrap();
-        assert!(!error.contains("sk-test"));
+        assert!(!error.contains("sk-xc-"));
         assert!(error.contains("验证") || error.contains("302"));
         server.join().unwrap();
     }
@@ -201,9 +201,22 @@ async fn bad_keys_and_redirects_return_redacted_errors() {
 async fn a_key_without_models_for_this_client_is_told_which_key_to_copy() {
     let (root, server) = server("200 OK", "", r#"{"models":[]}"#);
     let error = models::discover(request(root)).await.err().unwrap();
-    assert!(error.contains("只能用 Claude 的模型"));
-    assert!(error.contains("复制 Codex 的密钥"));
+    assert!(error.contains("用不了 Codex 的模型"));
+    assert!(error.contains("重新点一次『复制我的密钥』"));
     server.join().unwrap();
+}
+
+#[tokio::test]
+async fn text_that_is_not_a_complete_key_is_refused_before_any_request() {
+    // Nothing listens on this address; a request would fail with a connection message.
+    for (key, masked) in [("sk-xc-····xT4d", true), ("sk-not-a-shop-key", false)] {
+        let mut input = request("http://127.0.0.1:9".into());
+        input.api_key = key.into();
+        let error = models::discover(input).await.err().unwrap();
+        assert!(error.contains("这不是完整的密钥"));
+        assert_eq!(error.contains("打了码"), masked);
+        assert!(!error.contains("127.0.0.1"));
+    }
 }
 
 #[tokio::test]
@@ -216,7 +229,7 @@ async fn an_unreachable_api_is_retried_without_a_proxy_and_explains_itself() {
     assert!(advice.contains("xxchun（127.0.0.1）"));
     assert!(advice.contains("请关掉代理/VPN 再试一次"));
     assert!(detail.contains("不走代理"));
-    assert!(!error.contains("sk-test") && !error.contains("client_version"));
+    assert!(!error.contains("sk-xc-") && !error.contains("client_version"));
 }
 
 fn discovered(client: Client) -> models::DiscoveredModels {

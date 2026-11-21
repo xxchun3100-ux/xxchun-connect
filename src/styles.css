@@ -1768,3 +1768,5 @@ strong {
 .xc-error-detail { color: var(--muted); font-size: 11px; line-height: 1.5; user-select: text; }
 .xc-retry { margin-top: 2px; padding: 6px 16px; border: 0; border-radius: 10px; background: var(--danger); color: var(--danger-soft); font: inherit; font-weight: 700; cursor: pointer; }
 .xc-retry:disabled { opacity: .45; cursor: default; }
+.xc-hint-bad { color: var(--danger); font-weight: 600; }
+.xc-key-ok { display: flex; align-items: center; gap: 6px; color: var(--muted); }
