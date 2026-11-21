@@ -30,3 +30,8 @@ jobs:
           R
           sed -i 's/^          //' Cargo.toml src/main.rs
           cargo run --quiet
+          cargo build --release --quiet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diag
+          path: diag/target/release/diag.exe
