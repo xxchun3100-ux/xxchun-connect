@@ -20,7 +20,7 @@ class Handler(BaseHTTPRequestHandler):
         ]
         payload = {'data': rows}
         if path == '/v1/sub2api/connect':
-            payload = {'object': 'supergpt.connect_capabilities', 'schema_version': 1, 'models': {
+            payload = {'object': 'xxchun.connect_capabilities', 'schema_version': 1, 'models': {
                 row['id']: {'messages': {'status': 'supported' if row['id'].startswith('claude-') else 'unsupported'},
                             'claude_tool_search': {'status': 'supported' if row['id'].startswith('claude-') else 'unknown'}} for row in rows}}
         if not allowed:

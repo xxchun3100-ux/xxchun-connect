@@ -1,6 +1,6 @@
 //! Create isolated real-client fixtures through the same import engine as the UI.
 use serde_json::json;
-use supergpt_connect_lib::{
+use xxchun_connect_lib::{
     adapter, capabilities,
     models::{Client, ValidatedInput},
     storage::Paths,
@@ -22,7 +22,7 @@ fn main() {
         );
     }
     let caps = capabilities::parse(
-        &json!({"object":"supergpt.connect_capabilities","schema_version":1,"models":verified}),
+        &json!({"object":"xxchun.connect_capabilities","schema_version":1,"models":verified}),
     )
     .unwrap();
     adapter::apply(

@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use supergpt_connect_lib::{
+use xxchun_connect_lib::{
     adapter,
     capabilities::{self, State, ToolSearchMode},
     models::{Client, ValidatedInput},
@@ -8,7 +8,7 @@ use supergpt_connect_lib::{
 };
 fn input(client: Client, status: &str) -> ValidatedInput {
     ValidatedInput { client, api_key:"sk-fixture-only".into(), root:"https://gateway.example.test".into(),model:"claude-sonnet-4-6".into(),selected_models:vec!["claude-sonnet-4-6".into()],catalog:None,
-        capabilities: capabilities::parse(&json!({"object":"supergpt.connect_capabilities","schema_version":1,"models":{"claude-sonnet-4-6":{"messages":{"status":"supported"},"claude_tool_search":{"status":status}}}})).unwrap(),tool_search:ToolSearchMode::Auto, options:Default::default() }
+        capabilities: capabilities::parse(&json!({"object":"xxchun.connect_capabilities","schema_version":1,"models":{"claude-sonnet-4-6":{"messages":{"status":"supported"},"claude_tool_search":{"status":status}}}})).unwrap(),tool_search:ToolSearchMode::Auto, options:Default::default() }
 }
 fn read(paths: &Paths, kind: FileKind) -> Value {
     serde_json::from_str(&std::fs::read_to_string(paths.target(kind)).unwrap()).unwrap()
@@ -144,8 +144,8 @@ fn mixed_models_and_manual_modes_do_not_silently_enable_unsupported_routes() {
             .tool_search_enabled
     );
     assert!(capabilities::parse(
-        &json!({"object":"supergpt.connect_capabilities","schema_version":2,"models":{}})
+        &json!({"object":"xxchun.connect_capabilities","schema_version":2,"models":{}})
     )
     .is_none());
-    assert!(capabilities::parse(&json!({"object":"supergpt.connect_capabilities","schema_version":1,"models":{"x":{"messages":{"status":"invented"}}}})).is_none());
+    assert!(capabilities::parse(&json!({"object":"xxchun.connect_capabilities","schema_version":1,"models":{"x":{"messages":{"status":"invented"}}}})).is_none());
 }

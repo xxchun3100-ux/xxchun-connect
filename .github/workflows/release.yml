@@ -1,0 +1,80 @@
+name: Release xxchun Connect
+
+# Push a tag like v0.1.0: both zips are built natively, tested, and attached to a GitHub Release with SHA256SUMS.txt.
+#   xxchun-Connect-<ver>-Windows-x64-portable.zip   xxchun-Connect-<ver>-macOS-arm64.zip
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            build: build:macos
+            artifact: macOS-arm64
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: build:windows
+            artifact: Windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test:ui
+      - run: pnpm test:brand
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --locked
+      - run: pnpm run ${{ matrix.build }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xxchun-Connect-${{ matrix.artifact }}
+          path: release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd out
+          ls -l
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" out/*.zip out/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "xxchun Connect $TAG" --notes "Windows x64 免安装版和 macOS Apple Silicon 版。校验值见 SHA256SUMS.txt。"

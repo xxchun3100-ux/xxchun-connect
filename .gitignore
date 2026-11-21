@@ -11,6 +11,6 @@ release/
 *.key
 *.p12
 *.pfx
-.supergpt-connect/
+.xxchun-connect/
 .claude/
 .codex/

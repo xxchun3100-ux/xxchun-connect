@@ -56,7 +56,7 @@ pub struct SetupPreview {
 }
 
 pub fn parse(payload: &Value) -> Option<RouteCapabilities> {
-    if payload.get("object")?.as_str()? != "supergpt.connect_capabilities"
+    if payload.get("object")?.as_str()? != "xxchun.connect_capabilities"
         || payload.get("schema_version")?.as_u64()? != 1
     {
         return None;
