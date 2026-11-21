@@ -1,0 +1,32 @@
+name: Diagnose API reachability
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - shell: bash
+        run: |
+          cargo new --bin diag && cd diag
+          cat >> Cargo.toml <<'T'
+          reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+          tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+          T
+          cat > src/main.rs <<'R'
+          use std::error::Error;
+          #[tokio::main]
+          async fn main() {
+              let c = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).build().unwrap();
+              for url in ["https://api.xxchun.com/v1/models", "https://api.xxchun.com/v1/models?client_version=0.162.0", "https://xxchun.com/"] {
+                  match c.get(url).bearer_auth("sk-xc-diagnostic-not-a-key").header("Accept", "application/json").send().await {
+                      Ok(r) => println!("{url} -> HTTP {}", r.status()),
+                      Err(e) => { let mut s = format!("{e}"); let mut src = e.source(); while let Some(x) = src { s.push_str(&format!(" | {x}")); src = x.source(); } println!("{url} -> ERROR {s}"); }
+                  }
+              }
+          }
+          R
+          sed -i 's/^          //' Cargo.toml src/main.rs
+          cargo run --quiet
