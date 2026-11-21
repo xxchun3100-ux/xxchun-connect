@@ -5,14 +5,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, CircleAlert, ClipboardPaste, Eye, EyeOff, KeyRound, LoaderCircle, LockKeyhole, Moon, RotateCcw, Sun, Terminal, X } from "lucide-react";
 import { discoverModels, importConfig, nativeAvailable, previewConfig, readStatus, type Client, type ImportResult, type SelectionInput, type Status } from "./native";
-import { DEFAULT_STATION, stationAddress } from "./stations";
+import { DEFAULT_STATION, SHOP_SITE, entryHost, keyDestinations } from "./stations";
 import { clients, clientFamily } from "./clients";
 import { cleanKey, keyConfirmation, keyProblem, pickModels, splitError, wrongKeyMessage } from "./quick";
 import RestorePanel from "./RestorePanel";
 import { DEFAULT_OPTIONS, selectedOptions } from "./setup-options";
 import { version } from "../package.json";
 
-export const SHOP_KEY_PAGE = "xxchun.com/account?tab=api";
+export const SHOP_KEY_PAGE = `${SHOP_SITE}/account?tab=api`;
 const MAIN: Client[] = ["claude-desktop", "codex-desktop"];
 const MORE: Client[] = ["claude", "claude-vscode", "codex"];
 const PASTE_TIP = "在下面的框里点一下，按 Ctrl+V（Mac 按 ⌘V）粘贴。";
@@ -49,6 +49,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [retry, setRetry] = useState<Client | null>(null);
   const [viaSystem, setViaSystem] = useState(false);
+  const [entry, setEntry] = useState("");
   const [slow, setSlow] = useState(false);
   const running = useRef(false);
   const [hint, setHint] = useState("");
@@ -97,7 +98,7 @@ export default function App() {
     const waiting = window.setTimeout(() => setSlow(true), 2500);
     try {
       const found = await discoverModels({ client, baseUrl: DEFAULT_STATION.baseUrl, apiKey: cleanKey(apiKey) });
-      window.clearTimeout(waiting); setSlow(false); setViaSystem(found.viaSystemNetwork === true);
+      window.clearTimeout(waiting); setSlow(false); setViaSystem(found.viaSystemNetwork === true); setEntry(found.baseUrl);
       const chosen = pickModels(client, found.models.map((model) => model.id).filter((id) => clientFamily(client) === "codex" || found.capabilities?.models[id]?.messages.status !== "unsupported"));
       if (!chosen.ids.length) { setError(wrongKeyMessage(client)); return; }
       const input: SelectionInput = { discoveryId: found.discoveryId, selectedModels: chosen.ids, defaultModel: chosen.defaultId, toolSearch: "auto", options: selectedOptions(client, chosen.ids, DEFAULT_OPTIONS) };
@@ -140,7 +141,7 @@ export default function App() {
               <span className="success-mark"><Check size={28} strokeWidth={1.7} /></span>
               <h2 id="step-title" ref={heading} tabIndex={-1}>好了，完全退出 {shortName(result.client)} 再打开</h2>
               <p>{done.name} 已经接到 xxchun。只关窗口不算退出。</p>
-              {viaSystem && <p className="xc-via-system">已通过系统网络连接</p>}
+              <p className="xc-via-system">接入地址：{entryHost(result.baseUrl)}{viaSystem && " · 已通过系统网络连接"}</p>
               <div className="activation-guide">
                 <strong>接下来</strong>
                 <ol>{result.nextSteps.map((text) => <li key={text}>{text}</li>)}</ol>
@@ -160,7 +161,7 @@ export default function App() {
                 <input id="api-key" name="api-key" ref={field} type={visible ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setHint(""); }} placeholder="sk-xc-…" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={4096} disabled={disabled} aria-describedby="key-destination" />
                 <button type="button" className="icon-button" aria-label={visible ? "隐藏密钥" : "显示密钥"} aria-pressed={visible} onClick={() => setVisible(!visible)} disabled={disabled}>{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button>
               </div>
-              <p id="key-destination" className="key-destination"><LockKeyhole size={13} /><span>密钥只发给 <b>{stationAddress(DEFAULT_STATION)}</b>，并写进你电脑上的配置</span></p>
+              <p id="key-destination" className="key-destination"><LockKeyhole size={13} /><span>密钥只发给 <b>{keyDestinations(entry)}</b>，并写进你电脑上的配置</span></p>
               {hint ? <p className={hint === PASTE_TIP ? "xc-hint" : "xc-hint xc-hint-bad"} role={hint === PASTE_TIP ? "status" : "alert"}>{hint}</p>
                 : keyConfirmation(apiKey) && <p className="xc-hint xc-key-ok" role="status"><Check size={14} />{keyConfirmation(apiKey)}</p>}
               <div className="xc-targets">{MAIN.map((client) => target(client, true))}</div>
@@ -190,7 +191,7 @@ export default function App() {
         <Modal title="xxchun Connect" close={() => setAbout(false)}>
           <p className="dialog-intro">v{version} · xxchun 的本地接入小工具</p>
           <p className="about-copy">基于开源项目 SuperGPT Connect（MIT，github.com/superpilot69/supergpt-connect），其配置引擎来自 CC Switch（MIT，原作者 Jason Young）。完整许可随应用附带。</p>
-          <p className="about-copy">密钥只用于向 {stationAddress(DEFAULT_STATION)} 读取模型，以及写进你电脑上的客户端配置；不保存在这个应用里。</p>
+          <p className="about-copy">密钥只用于向 {keyDestinations("")} 读取模型，以及写进你电脑上的客户端配置；不保存在这个应用里。</p>
           <div className="dialog-actions"><button className="primary-button" onClick={() => setAbout(false)}>知道了</button></div>
         </Modal>
       )}

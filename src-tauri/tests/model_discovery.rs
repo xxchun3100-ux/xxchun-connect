@@ -206,6 +206,83 @@ async fn a_key_without_models_for_this_client_is_told_which_key_to_copy() {
     server.join().unwrap();
 }
 
+fn closed_address() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let root = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    root
+}
+
+#[tokio::test]
+async fn the_entry_that_answers_is_the_address_written_when_the_first_one_fails() {
+    let closed = closed_address();
+    let (root, server) = server("200 OK", "", r#"{"data":[{"id":"gpt-test-codex"}]}"#);
+    let plan = [
+        (0, 0, models::Route::System),
+        (0, 0, models::Route::Direct),
+        (0, 1, models::Route::System),
+    ];
+    let entries = [closed.clone(), root.clone()];
+    let key = "sk-xc-testnotarealkey00000000000000000";
+    let data = models::discover_entries(Client::Codex, key, &entries, &plan)
+        .await
+        .unwrap();
+    assert_eq!(data.root, root);
+    assert!(server
+        .join()
+        .unwrap()
+        .starts_with("GET /v1/models?client_version="));
+    let session = models::DiscoverySession::new(data);
+    let response = session.response();
+    assert_eq!(response.base_url, root);
+    let prepared = session
+        .prepare(&models::SelectionInput {
+            tool_search: Default::default(),
+            options: Default::default(),
+            discovery_id: response.discovery_id,
+            selected_models: vec!["gpt-test-codex".into()],
+            default_model: "gpt-test-codex".into(),
+        })
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::for_home(home.path());
+    let result = adapter::apply(&paths, prepared).unwrap();
+    assert_eq!(result.base_url, root);
+    let written = std::fs::read_to_string(paths.target(FileKind::CodexConfig)).unwrap();
+    assert!(written.contains(&format!("{root}/v1")));
+    assert!(!written.contains(&closed));
+}
+
+#[tokio::test]
+async fn the_first_entry_is_used_when_it_answers_and_the_others_are_not_asked() {
+    let (first, first_server) = server("200 OK", "", r#"{"data":[{"id":"gpt-test-codex"}]}"#);
+    let closed = closed_address();
+    let entries = [first.clone(), closed];
+    let key = "sk-xc-testnotarealkey00000000000000000";
+    let plan = models::attempt_plan(entries.len());
+    let data = models::discover_entries(Client::Codex, key, &entries, &plan)
+        .await
+        .unwrap();
+    assert_eq!(data.root, first);
+    first_server.join().unwrap();
+}
+
+#[tokio::test]
+async fn when_no_entry_answers_nothing_is_chosen_and_each_entry_tried_is_named() {
+    let entries = [closed_address(), closed_address()];
+    let plan = [(0, 0, models::Route::Direct), (0, 1, models::Route::Direct)];
+    let key = "sk-xc-testnotarealkey00000000000000000";
+    let error = models::discover_entries(Client::Codex, key, &entries, &plan)
+        .await
+        .err()
+        .unwrap();
+    let (advice, detail) = error.split_once('\n').unwrap();
+    assert!(advice.contains("xxchun（127.0.0.1、127.0.0.1）"));
+    assert!(detail.starts_with("试了 2 次："));
+    assert_eq!(detail.matches("127.0.0.1 — 不走代理：").count(), 2);
+    assert!(!error.contains("sk-xc-"));
+}
+
 // Runs only where the operating system ships curl (Windows 10 1803+, macOS).
 #[tokio::test]
 async fn the_systems_own_curl_reads_the_catalog_without_the_key_in_its_arguments() {

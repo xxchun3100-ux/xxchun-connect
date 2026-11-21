@@ -214,11 +214,24 @@ const CODEX_CATALOG_CLIENT_VERSION: &str = "0.162.0";
 const BODY_LIMIT: usize = 2 * 1024 * 1024;
 const READ_FAILED: &str = "读取模型目录失败，请重试。";
 const TOO_LARGE: &str = "模型目录过大，配置尚未写入。";
-const HTTP_SECONDS: u64 = 15;
-// After the first attempt the reqwest attempts share this much time, so that fast failures
-// are retried several times while one slow attempt is not repeated.
-const HTTP_BUDGET_MS: u64 = 16_000;
-const CURL_SECONDS: u64 = 8;
+// The addresses of this shop's API, in the order they are tried. Some networks reset
+// connections by the name asked for, so the same service answers under more than one name.
+// src/stations.ts lists the same addresses for the window (a test compares the two).
+pub const BUILT_IN_ENTRIES: [&str; 2] = ["https://api.xxchunai.com", "https://api.xxchun.com"];
+// A list fetched from the service may only name hosts under these domains, so an answer
+// that was tampered with on the way cannot send anybody's key somewhere else.
+const ENTRY_DOMAINS: [&str; 2] = ["xxchunai.com", "xxchun.com"];
+const ENTRY_LIST_SECONDS: u64 = 3;
+const ENTRY_LIST_LIMIT: usize = 6;
+// The longest the first attempt at an entry may take.
+const HTTP_SECONDS: u64 = 10;
+const FOLLOW_UP_SECONDS: u64 = 15;
+// After the first attempt at an entry, further reqwest attempts are made only inside this
+// much time since the start, so that fast failures are retried several times while slow
+// attempts are not repeated. Nothing at all is started after TOTAL_BUDGET_MS.
+const HTTP_BUDGET_MS: u64 = 20_000;
+const TOTAL_BUDGET_MS: u64 = 40_000;
+const CURL_SECONDS: u64 = 6;
 // Waits before each round (a round is the system-settings client, then the direct one).
 // Establishing the connection is flaky on some customers' paths and a plain retry works.
 const ROUND_WAITS_MS: [u64; 4] = [0, 400, 1000, 2000];
@@ -238,36 +251,138 @@ pub enum Route {
     Direct,
     Curl,
 }
-// A route that was tried, the kind of its cause, and the sanitized cause.
-type Tried = (Route, &'static str, String);
+// The entry (by its place in the list) and route that were tried, the kind of the cause,
+// and the sanitized cause.
+type Tried = (usize, Route, &'static str, String);
 
-// Every attempt of a discovery, in order, with the wait before it in milliseconds:
-// four rounds of both clients, then the system's curl once.
-pub fn attempt_plan() -> Vec<(u64, Route)> {
+// Every attempt of a discovery, in order: the wait before it in milliseconds, the entry
+// and the route. A round is the system-settings client, then the direct one. Each entry
+// gets two rounds before the next entry is tried, then each gets its two later rounds,
+// and at the end the system's curl is tried once for each entry.
+pub fn attempt_plan(entries: usize) -> Vec<(u64, usize, Route)> {
     let mut plan = Vec::new();
-    for wait in ROUND_WAITS_MS {
-        plan.push((wait, Route::System));
-        plan.push((0, Route::Direct));
+    for rounds in [0..2, 2..4] {
+        for entry in 0..entries {
+            for round in rounds.clone() {
+                plan.push((ROUND_WAITS_MS[round], entry, Route::System));
+                plan.push((0, entry, Route::Direct));
+            }
+        }
     }
-    plan.push((0, Route::Curl));
+    for entry in 0..entries {
+        plan.push((0, entry, Route::Curl));
+    }
     plan
 }
 
-// How long an attempt may take, or None when it is skipped because the time for retries
-// is used up. `elapsed_ms` is the time since the discovery began, the wait included.
+// How long an attempt may take, or None when it is skipped because the time is used up.
+// `first` is the first reqwest attempt at its entry: every entry gets one, so a name that
+// hangs cannot use up the time of the next name. `elapsed_ms` is the time since the
+// discovery began, the wait included.
 fn attempt_seconds(route: Route, first: bool, elapsed_ms: u64) -> Option<u64> {
-    if route == Route::Curl {
-        return Some(CURL_SECONDS);
-    }
-    if first {
-        return Some(HTTP_SECONDS);
-    }
-    let left = HTTP_BUDGET_MS.saturating_sub(elapsed_ms) / 1000;
-    if left < 2 {
+    let allowed = if route == Route::Curl {
+        CURL_SECONDS
+    } else if first {
+        HTTP_SECONDS
+    } else {
+        (HTTP_BUDGET_MS.saturating_sub(elapsed_ms) / 1000).min(HTTP_SECONDS)
+    };
+    let seconds = allowed.min(TOTAL_BUDGET_MS.saturating_sub(elapsed_ms) / 1000);
+    if seconds < 2 {
         None
     } else {
-        Some(left.min(HTTP_SECONDS))
+        Some(seconds)
     }
+}
+
+// An address a fetched list may name: https, a host under one of this shop's domains,
+// and nothing else in it. Returned in the form the built-in entries have.
+fn allowed_entry(text: &str) -> Option<String> {
+    let url = reqwest::Url::parse(text.trim()).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let on_list = ENTRY_DOMAINS
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+    if url.scheme() != "https"
+        || !on_list
+        || url.port().is_some()
+        || !matches!(url.path(), "" | "/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    Some(format!("https://{host}"))
+}
+
+// {"entries":["https://…", …]}. One address that is not allowed and the whole list is
+// dropped; only the first ENTRY_LIST_LIMIT are read.
+fn parse_entries(body: &[u8]) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let rows = value.get("entries")?.as_array()?;
+    let mut entries = Vec::new();
+    for row in rows.iter().take(ENTRY_LIST_LIMIT) {
+        let entry = allowed_entry(row.as_str()?)?;
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+// A fetched list goes first, in its own order; the built-in entries always stay in.
+fn merged_entries(fetched: Option<Vec<String>>) -> Vec<String> {
+    let mut entries = fetched.unwrap_or_default();
+    for entry in BUILT_IN_ENTRIES {
+        if !entries.iter().any(|known| known.as_str() == entry) {
+            entries.push(entry.to_string());
+        }
+    }
+    entries
+}
+
+// Best effort and short: the first built-in entry that gives any HTTP answer settles it
+// (today the file does not exist and the answer is 404). The key is not sent.
+async fn fetched_entries() -> Option<Vec<String>> {
+    let Ok(Transport::Http(client)) = Transport::open(Route::System) else {
+        return None;
+    };
+    for entry in BUILT_IN_ENTRIES {
+        let sent = client
+            .get(format!("{entry}/connect-entries.json"))
+            .timeout(Duration::from_secs(ENTRY_LIST_SECONDS))
+            .header("Accept", "application/json")
+            .send()
+            .await;
+        let Ok(mut response) = sent else {
+            continue;
+        };
+        if !response.status().is_success() {
+            return None;
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if body.len() + chunk.len() > 16 * 1024 {
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        return parse_entries(&body);
+    }
+    None
+}
+
+fn host_of(root: &str) -> String {
+    reqwest::Url::parse(root)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| root.to_string())
 }
 
 // A failure that came back quickly may be gone a moment later; a timeout is not repeated.
@@ -320,7 +435,7 @@ impl Failure {
             Self::Message(message) => message.to_string(),
             Self::Unavailable => connection_message(host, false, ""),
             Self::Unreachable { kind, detail } => {
-                unreachable_message(host, &[(route, kind, detail)])
+                unreachable_message(&[host.to_string()], &[(0, route, kind, detail)])
             }
         }
     }
@@ -359,7 +474,7 @@ impl Transport {
         let mut outcome = Err(Failure::Unavailable);
         for wait in FOLLOW_UP_WAITS_MS {
             pause(wait);
-            outcome = self.get(url, api_key, HTTP_SECONDS).await;
+            outcome = self.get(url, api_key, FOLLOW_UP_SECONDS).await;
             if !worth_retrying(&outcome) {
                 break;
             }
@@ -664,30 +779,40 @@ fn cause_summary(kinds: &[&str]) -> String {
         .join(", ")
 }
 
-// One line: how many attempts and which kinds of cause, then the last cause on each route.
-fn failure_detail(failures: &[Tried]) -> String {
+// One line: how many attempts and which kinds of cause, then for each entry that was
+// tried the last cause on each route.
+fn failure_detail(hosts: &[String], failures: &[Tried]) -> String {
     if failures.is_empty() {
         return String::new();
     }
-    let kinds: Vec<&str> = failures.iter().map(|(_, kind, _)| *kind).collect();
-    let mut last = Vec::new();
-    for route in [Route::System, Route::Direct, Route::Curl] {
-        if let Some((_, kind, detail)) = failures.iter().rev().find(|tried| tried.0 == route) {
-            last.push(format!("{}：{kind}: {detail}", route.label()));
+    let kinds: Vec<&str> = failures.iter().map(|tried| tried.2).collect();
+    let mut parts = Vec::new();
+    for (entry, host) in hosts.iter().enumerate() {
+        let mut last = Vec::new();
+        for route in [Route::System, Route::Direct, Route::Curl] {
+            let found = failures
+                .iter()
+                .rev()
+                .find(|tried| tried.0 == entry && tried.1 == route);
+            if let Some(tried) = found {
+                last.push(format!("{}：{}: {}", route.label(), tried.2, tried.3));
+            }
+        }
+        if !last.is_empty() {
+            parts.push(format!("{host} — {}", last.join("；")));
         }
     }
     format!(
         "试了 {} 次：{}。{}",
         failures.len(),
         cause_summary(&kinds),
-        last.join("；")
+        parts.join("。")
     )
 }
 
-fn unreachable_message(host: &str, failures: &[Tried]) -> String {
-    let timed_out =
-        !failures.is_empty() && failures.iter().all(|(_, kind, _)| *kind == "timeout");
-    connection_message(host, timed_out, &failure_detail(failures))
+fn unreachable_message(hosts: &[String], failures: &[Tried]) -> String {
+    let timed_out = !failures.is_empty() && failures.iter().all(|tried| tried.2 == "timeout");
+    connection_message(&hosts.join("、"), timed_out, &failure_detail(hosts, failures))
 }
 
 fn describe_error(error: &reqwest::Error, api_key: &str) -> (&'static str, String) {
@@ -810,61 +935,116 @@ fn sanitize_cause(text: &str, api_key: &str) -> String {
     }
 }
 
-pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String> {
-    discover_with(input, &attempt_plan()).await
+fn catalog_url(root: &str, codex: bool) -> String {
+    if codex {
+        format!("{root}/v1/models?client_version={CODEX_CATALOG_CLIENT_VERSION}")
+    } else {
+        format!("{root}/v1/models")
+    }
 }
 
-// `plan` is the attempts to make, each with the wait before it; the app uses attempt_plan().
+pub async fn discover(input: DiscoveryInput) -> Result<DiscoveredModels, String> {
+    let DiscoveryInput {
+        client,
+        api_key,
+        base_url,
+    } = input;
+    // Nothing is sent anywhere until the text has the shape of a key.
+    if let Some(problem) = key_problem(&api_key) {
+        return Err(problem);
+    }
+    let root = normalize_root(&base_url)?;
+    // Any of the shop's own addresses stands for the whole list of them.
+    let entries = if BUILT_IN_ENTRIES.contains(&root.as_str()) {
+        merged_entries(fetched_entries().await)
+    } else {
+        vec![root]
+    };
+    let plan = attempt_plan(entries.len());
+    discover_entries(client, &api_key, &entries, &plan).await
+}
+
+// One address, and `plan` is the attempts to make at it, each with the wait before it.
 pub async fn discover_with(
     input: DiscoveryInput,
     plan: &[(u64, Route)],
 ) -> Result<DiscoveredModels, String> {
+    let DiscoveryInput {
+        client,
+        api_key,
+        base_url,
+    } = input;
+    let steps: Vec<(u64, usize, Route)> = plan.iter().map(|(wait, route)| (*wait, 0, *route)).collect();
+    discover_entries(client, &api_key, &[base_url], &steps).await
+}
+
+// `entries` are tried as `plan` says (wait, place of the entry in the list, route). The
+// entry that answers is the one everything else uses: the later requests, and the address
+// that is written into the client's configuration. An entry that did not answer is never
+// written anywhere.
+pub async fn discover_entries(
+    client: Client,
+    key: &str,
+    entries: &[String],
+    plan: &[(u64, usize, Route)],
+) -> Result<DiscoveredModels, String> {
     // Nothing is sent anywhere until the text has the shape of a key.
-    if let Some(problem) = key_problem(&input.api_key) {
+    if let Some(problem) = key_problem(key) {
         return Err(problem);
     }
-    let api_key = normalize_key(&input.api_key).to_string();
-    let root = normalize_root(&input.base_url)?;
-    let host = reqwest::Url::parse(&root)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .unwrap_or_else(|| root.clone());
-    let endpoint = format!("{root}/v1/models");
-    let codex = input.client.is_codex();
-    let catalog_url = if codex {
-        format!("{endpoint}?client_version={CODEX_CATALOG_CLIENT_VERSION}")
-    } else {
-        endpoint.clone()
-    };
-    // A flaky connection, a system proxy that is switched on but not answering, or HTTPS
-    // scanning by antivirus is the usual reason a reachable API cannot be reached: go
-    // through the plan until one attempt gets an HTTP answer, and keep that transport for
-    // the rest of this discovery. Any HTTP answer ends the attempts, whatever its status.
+    let api_key = normalize_key(key).to_string();
+    let mut roots = Vec::new();
+    for entry in entries {
+        roots.push(normalize_root(entry)?);
+    }
+    if roots.is_empty() {
+        return Err("API 地址格式不正确，请填写完整的 https:// 地址。".into());
+    }
+    let hosts: Vec<String> = roots.iter().map(|root| host_of(root)).collect();
+    let codex = client.is_codex();
+    // A name that is reset on this network, a flaky connection, a system proxy that is
+    // switched on but not answering, or HTTPS scanning by antivirus is the usual reason a
+    // reachable API cannot be reached: go through the plan until one attempt gets an HTTP
+    // answer. Any HTTP answer ends the attempts, whatever its status.
     let started = Instant::now();
     let mut failures: Vec<Tried> = Vec::new();
+    let mut asked = vec![false; roots.len()];
     let mut reached = None;
-    for (index, (wait, route)) in plan.iter().copied().enumerate() {
+    for (wait, entry, route) in plan.iter().copied() {
+        let Some(entry_root) = roots.get(entry) else {
+            continue;
+        };
+        let first = route != Route::Curl && !asked[entry];
         let elapsed = started.elapsed().as_millis() as u64 + wait;
-        let Some(seconds) = attempt_seconds(route, index == 0, elapsed) else {
+        let Some(seconds) = attempt_seconds(route, first, elapsed) else {
             continue;
         };
         pause(wait);
+        if route != Route::Curl {
+            asked[entry] = true;
+        }
+        let url = catalog_url(entry_root, codex);
         let transport = Transport::open(route)?;
-        let outcome = transport.get(&catalog_url, &api_key, seconds).await;
+        let outcome = transport.get(&url, &api_key, seconds).await;
         match outcome {
             Ok(reply) => {
-                reached = Some((transport, route, reply));
+                reached = Some((transport, route, entry, reply));
                 break;
             }
-            Err(Failure::Unreachable { kind, detail }) => failures.push((route, kind, detail)),
+            Err(Failure::Unreachable { kind, detail }) => {
+                failures.push((entry, route, kind, detail))
+            }
             // No system curl on this computer: the causes found so far stand.
             Err(Failure::Unavailable) => {}
-            Err(failure) => return Err(failure.into_message(&host, route)),
+            Err(failure) => return Err(failure.into_message(&hosts[entry], route)),
         }
     }
-    let Some((transport, route, mut reply)) = reached else {
-        return Err(unreachable_message(&host, &failures));
+    let Some((transport, route, entry, mut reply)) = reached else {
+        return Err(unreachable_message(&hosts, &failures));
     };
+    let root = roots[entry].clone();
+    let host = hosts[entry].clone();
+    let endpoint = format!("{root}/v1/models");
     if codex && matches!(reply.status, 400 | 404 | 405 | 422) {
         // Some third-party gateways reject query parameters. Fall back once,
         // but never retry authentication, rate-limit, redirect, or server errors.
@@ -872,14 +1052,14 @@ pub async fn discover_with(
         reply = plain.map_err(|failure| failure.into_message(&host, route))?;
     }
     let payload = catalog_payload(&reply)?;
-    let capabilities = if !input.client.is_codex() {
+    let capabilities = if !client.is_codex() {
         crate::capabilities::discover(&transport, &root, &api_key).await
     } else {
         Default::default()
     };
     let models = catalog_models(&payload);
     if models.is_empty() {
-        return Err(empty_catalog_message(input.client).into());
+        return Err(empty_catalog_message(client).into());
     }
     let rows = payload
         .get("data")
@@ -908,7 +1088,7 @@ pub async fn discover_with(
         })
         .collect();
     Ok(DiscoveredModels {
-        client: input.client,
+        client,
         api_key,
         root,
         payload,
@@ -1242,22 +1422,134 @@ mod connection_tests {
         assert!(!timeout.contains('\n'));
     }
     #[test]
-    fn the_plan_is_four_rounds_of_both_clients_then_the_systems_curl_once() {
-        let plan = attempt_plan();
-        let waits: Vec<u64> = plan.iter().map(|(wait, _)| *wait).collect();
+    fn the_plan_gives_each_entry_two_rounds_then_the_later_rounds_then_the_systems_curl() {
+        // One entry: four rounds of both clients, then the system's curl once.
+        let plan = attempt_plan(1);
+        let waits: Vec<u64> = plan.iter().map(|step| step.0).collect();
         assert_eq!(waits, vec![0, 0, 400, 0, 1000, 0, 2000, 0, 0]);
+        assert!(plan.iter().all(|step| step.1 == 0));
         for round in plan[..8].chunks(2) {
-            assert_eq!((round[0].1, round[1].1), (Route::System, Route::Direct));
+            assert_eq!((round[0].2, round[1].2), (Route::System, Route::Direct));
         }
-        assert_eq!(plan[8], (0, Route::Curl));
-        // The first attempt may take its full time; later ones share what is left, and
-        // are skipped when too little is left. The system's curl is always tried.
-        assert_eq!(attempt_seconds(Route::System, true, 0), Some(15));
-        assert_eq!(attempt_seconds(Route::Direct, false, 1_000), Some(15));
-        assert_eq!(attempt_seconds(Route::System, false, 9_400), Some(6));
-        assert_eq!(attempt_seconds(Route::Direct, false, 14_500), None);
-        assert_eq!(attempt_seconds(Route::Direct, false, 60_000), None);
-        assert_eq!(attempt_seconds(Route::Curl, false, 60_000), Some(8));
+        assert_eq!(plan[8], (0, 0, Route::Curl));
+        // Two entries: the second is asked after two rounds at the first, not after four.
+        let plan = attempt_plan(2);
+        let order: Vec<(usize, u64)> = plan
+            .iter()
+            .filter(|step| step.2 == Route::System)
+            .map(|step| (step.1, step.0))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (0, 0),
+                (0, 400),
+                (1, 0),
+                (1, 400),
+                (0, 1000),
+                (0, 2000),
+                (1, 1000),
+                (1, 2000)
+            ]
+        );
+        assert_eq!(plan.len(), 18);
+        assert_eq!(plan[16..], [(0, 0, Route::Curl), (0, 1, Route::Curl)]);
+        assert!(attempt_plan(0).is_empty());
+        // The first attempt at an entry may take its full time whenever it comes; later
+        // ones share what is left; nothing starts once the whole time is used up.
+        assert_eq!(attempt_seconds(Route::System, true, 0), Some(10));
+        assert_eq!(attempt_seconds(Route::Direct, false, 1_000), Some(10));
+        assert_eq!(attempt_seconds(Route::System, false, 14_400), Some(5));
+        assert_eq!(attempt_seconds(Route::Direct, false, 18_500), None);
+        assert_eq!(attempt_seconds(Route::System, true, 18_500), Some(10));
+        assert_eq!(attempt_seconds(Route::System, true, 39_000), None);
+        assert_eq!(attempt_seconds(Route::Curl, false, 30_000), Some(6));
+        assert_eq!(attempt_seconds(Route::Curl, false, 36_500), Some(3));
+        assert_eq!(attempt_seconds(Route::Curl, false, 60_000), None);
+    }
+    #[test]
+    fn a_fetched_list_may_only_name_https_hosts_of_this_shop() {
+        for (text, entry) in [
+            ("https://api.xxchunai.com", "https://api.xxchunai.com"),
+            (" https://API2.XXCHUNAI.COM/ ", "https://api2.xxchunai.com"),
+            ("https://xxchun.com", "https://xxchun.com"),
+            ("https://a.b.xxchun.com", "https://a.b.xxchun.com"),
+        ] {
+            assert_eq!(allowed_entry(text).as_deref(), Some(entry), "{text}");
+        }
+        for text in [
+            "http://api.xxchunai.com",
+            "https://evil.example",
+            "https://evilxxchunai.com",
+            "https://api.xxchunai.com.evil.example",
+            "https://api.xxchunai.com@evil.example",
+            "https://user:pass@api.xxchunai.com",
+            "https://api.xxchunai.com:8443",
+            "https://api.xxchunai.com/v1",
+            "https://api.xxchunai.com/?next=https://evil.example",
+            "https://api.xxchunai.com#x",
+            "https://api.xxchunai.com.",
+            "api.xxchunai.com",
+            "",
+        ] {
+            assert_eq!(allowed_entry(text), None, "{text}");
+        }
+        assert_eq!(
+            parse_entries(br#"{"entries":["https://api3.xxchunai.com","https://api.xxchun.com","https://api3.xxchunai.com/"]}"#),
+            Some(vec![
+                "https://api3.xxchunai.com".to_string(),
+                "https://api.xxchun.com".to_string()
+            ])
+        );
+        // One address off the list and the whole answer is dropped.
+        let bad: [&[u8]; 7] = [
+            br#"{"entries":["https://api.xxchunai.com","https://evil.example"]}"#,
+            br#"{"entries":["https://api.xxchunai.com",7]}"#,
+            br#"{"entries":[]}"#,
+            br#"{"entries":"https://api.xxchunai.com"}"#,
+            br#"{"other":[]}"#,
+            b"<html>not found</html>",
+            b"",
+        ];
+        for body in bad {
+            assert_eq!(parse_entries(body), None);
+        }
+        // Only the first six are read.
+        let many: Vec<String> = (0..9).map(|n| format!("\"https://a{n}.xxchunai.com\"")).collect();
+        let many = format!("{{\"entries\":[{}]}}", many.join(","));
+        assert_eq!(parse_entries(many.as_bytes()).unwrap().len(), 6);
+    }
+    #[test]
+    fn the_built_in_entries_are_ordered_and_always_stay_in_the_list() {
+        assert_eq!(
+            BUILT_IN_ENTRIES,
+            ["https://api.xxchunai.com", "https://api.xxchun.com"]
+        );
+        for entry in BUILT_IN_ENTRIES {
+            assert_eq!(allowed_entry(entry).as_deref(), Some(entry));
+            assert_eq!(normalize_root(entry).as_deref(), Ok(entry));
+        }
+        assert_eq!(merged_entries(None), BUILT_IN_ENTRIES);
+        assert_eq!(
+            merged_entries(Some(vec![
+                "https://api.xxchun.com".to_string(),
+                "https://api3.xxchunai.com".to_string()
+            ])),
+            [
+                "https://api.xxchun.com",
+                "https://api3.xxchunai.com",
+                "https://api.xxchunai.com"
+            ]
+        );
+        assert_eq!(
+            catalog_url(BUILT_IN_ENTRIES[0], true),
+            "https://api.xxchunai.com/v1/models?client_version=0.162.0"
+        );
+        assert_eq!(
+            catalog_url(BUILT_IN_ENTRIES[1], false),
+            "https://api.xxchun.com/v1/models"
+        );
+        assert_eq!(host_of("https://api.xxchunai.com"), "api.xxchunai.com");
     }
     #[test]
     fn only_a_quick_failure_to_connect_is_tried_again() {
@@ -1285,36 +1577,38 @@ mod connection_tests {
             "connect ×3, tls ×1"
         );
         assert_eq!(cause_summary(&[]), "");
+        let hosts = vec!["api.xxchunai.com".to_string(), "api.xxchun.com".to_string()];
         let failures: Vec<Tried> = vec![
-            (Route::System, "proxy", "a".to_string()),
-            (Route::Direct, "connect", "b".to_string()),
-            (Route::System, "proxy", "c".to_string()),
-            (Route::Direct, "connect", "d".to_string()),
-            (Route::Curl, "tls", "e".to_string()),
+            (0, Route::System, "proxy", "a".to_string()),
+            (0, Route::Direct, "connect", "b".to_string()),
+            (0, Route::System, "proxy", "c".to_string()),
+            (1, Route::Direct, "connect", "d".to_string()),
+            (1, Route::Curl, "tls", "e".to_string()),
         ];
         assert_eq!(
-            failure_detail(&failures),
-            "试了 5 次：proxy ×2, connect ×2, tls ×1。系统网络设置：proxy: c；不走代理：connect: d；系统自带 curl：tls: e"
+            failure_detail(&hosts, &failures),
+            "试了 5 次：proxy ×2, connect ×2, tls ×1。api.xxchunai.com — 系统网络设置：proxy: c；不走代理：connect: b。api.xxchun.com — 不走代理：connect: d；系统自带 curl：tls: e"
         );
-        // Without a system curl the causes of the two clients stand alone.
+        // An entry that was never reached in the plan is not named.
         assert_eq!(
-            failure_detail(&failures[..2]),
-            "试了 2 次：proxy ×1, connect ×1。系统网络设置：proxy: a；不走代理：connect: b"
+            failure_detail(&hosts, &failures[..2]),
+            "试了 2 次：proxy ×1, connect ×1。api.xxchunai.com — 系统网络设置：proxy: a；不走代理：connect: b"
         );
-        assert_eq!(failure_detail(&[]), "");
-        assert!(unreachable_message("api.xxchun.com", &failures).starts_with("连不上 xxchun"));
+        assert_eq!(failure_detail(&hosts, &[]), "");
+        assert!(unreachable_message(&hosts, &failures)
+            .starts_with("连不上 xxchun（api.xxchunai.com、api.xxchun.com）。"));
         let slow: Vec<Tried> = vec![
-            (Route::System, "timeout", "a".to_string()),
-            (Route::Curl, "timeout", "b".to_string()),
+            (0, Route::System, "timeout", "a".to_string()),
+            (1, Route::Curl, "timeout", "b".to_string()),
         ];
-        assert!(unreachable_message("api.xxchun.com", &slow).starts_with("连接 xxchun"));
-        assert!(unreachable_message("api.xxchun.com", &[]).starts_with("连不上 xxchun"));
+        assert!(unreachable_message(&hosts, &slow).starts_with("连接 xxchun"));
+        assert!(unreachable_message(&hosts, &[]).starts_with("连不上 xxchun"));
         let message = Failure::Unreachable {
             kind: "tls",
             detail: "c".to_string(),
         }
         .into_message("api.xxchun.com", Route::Curl);
-        assert!(message.ends_with("\n试了 1 次：tls ×1。系统自带 curl：tls: c"));
+        assert!(message.ends_with("\n试了 1 次：tls ×1。api.xxchun.com — 系统自带 curl：tls: c"));
         assert_eq!(
             Failure::Builder.into_message("api.xxchun.com", Route::System),
             KEY_HELP
