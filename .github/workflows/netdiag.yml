@@ -1,0 +1,19 @@
+name: netdiag
+on:
+  push:
+    branches: [diag]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --locked --release --example netdiag
+      - run: src-tauri/target/release/examples/netdiag.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netdiag
+          path: src-tauri/target/release/examples/netdiag.exe
