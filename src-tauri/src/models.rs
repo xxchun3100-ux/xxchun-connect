@@ -714,9 +714,9 @@ fn catalog_payload(reply: &Reply) -> Result<Value, String> {
 // The first line is for the person; the line after it is the technical cause, shown small.
 fn connection_message(host: &str, timed_out: bool, detail: &str) -> String {
     let what = if timed_out {
-        format!("连接 xxchun（{host}）超时了。")
+        format!("连接 xxchunai（{host}）超时了。")
     } else {
-        format!("连不上 xxchun（{host}）。")
+        format!("连不上 xxchunai（{host}）。")
     };
     let advice = format!(
         "{what}请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。"
@@ -737,7 +737,7 @@ fn empty_catalog_message(client: Client) -> &'static str {
 }
 
 const KEY_HELP: &str =
-    "这不是完整的密钥。回到 xxchun 的接入教程，点『复制我的密钥』，再回来点『粘贴密钥』。";
+    "这不是完整的密钥。回到 xxchunai 的接入教程，点『复制我的密钥』，再回来点『粘贴密钥』。";
 const KEY_MASKED: &str = "你复制的是打了码的密钥（中间是点），不能用。";
 
 // Spaces and quotes around a key come from copying it; they are not part of it.
@@ -1415,10 +1415,10 @@ mod connection_tests {
     fn connection_failures_say_what_to_do_and_keep_the_cause_on_its_own_line() {
         assert_eq!(
             connection_message("api.xxchun.com", false, "connect: refused"),
-            "连不上 xxchun（api.xxchun.com）。请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。\nconnect: refused"
+            "连不上 xxchunai（api.xxchun.com）。请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。\nconnect: refused"
         );
         let timeout = connection_message("api.xxchun.com", true, "");
-        assert!(timeout.starts_with("连接 xxchun（api.xxchun.com）超时了。请暂时关掉代理/VPN"));
+        assert!(timeout.starts_with("连接 xxchunai（api.xxchun.com）超时了。请暂时关掉代理/VPN"));
         assert!(!timeout.contains('\n'));
     }
     #[test]
@@ -1596,13 +1596,13 @@ mod connection_tests {
         );
         assert_eq!(failure_detail(&hosts, &[]), "");
         assert!(unreachable_message(&hosts, &failures)
-            .starts_with("连不上 xxchun（api.xxchunai.com、api.xxchun.com）。"));
+            .starts_with("连不上 xxchunai（api.xxchunai.com、api.xxchun.com）。"));
         let slow: Vec<Tried> = vec![
             (0, Route::System, "timeout", "a".to_string()),
             (1, Route::Curl, "timeout", "b".to_string()),
         ];
-        assert!(unreachable_message(&hosts, &slow).starts_with("连接 xxchun"));
-        assert!(unreachable_message(&hosts, &[]).starts_with("连不上 xxchun"));
+        assert!(unreachable_message(&hosts, &slow).starts_with("连接 xxchunai（"));
+        assert!(unreachable_message(&hosts, &[]).starts_with("连不上 xxchunai（"));
         let message = Failure::Unreachable {
             kind: "tls",
             detail: "c".to_string(),

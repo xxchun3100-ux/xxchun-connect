@@ -1,7 +1,7 @@
-name: Release xxchun Connect
+name: Release xxchunai Connect
 
 # Push a tag like v0.1.0: both zips are built natively, tested, and attached to a GitHub Release with SHA256SUMS.txt.
-#   xxchun-Connect-<ver>-Windows-x64-portable.zip   xxchun-Connect-<ver>-macOS-arm64.zip
+#   xxchunai-Connect-<ver>-Windows-x64-portable.zip   xxchunai-Connect-<ver>-macOS-arm64.zip
 on:
   push:
     tags:
@@ -50,7 +50,7 @@ jobs:
       - run: pnpm run ${{ matrix.build }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: xxchun-Connect-${{ matrix.artifact }}
+          name: xxchunai-Connect-${{ matrix.artifact }}
           path: release/*.zip
           if-no-files-found: error
           retention-days: 14
@@ -77,4 +77,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" out/*.zip out/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "xxchun Connect $TAG" --notes "Windows x64 免安装版和 macOS Apple Silicon 版。校验值见 SHA256SUMS.txt。"
+        run: gh release create "$TAG" out/*.zip out/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "xxchunai Connect $TAG" --notes "Windows x64 免安装版和 macOS Apple Silicon 版。校验值见 SHA256SUMS.txt。"

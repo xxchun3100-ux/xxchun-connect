@@ -3,11 +3,11 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { DEFAULT_STATION, ENTRIES, SHOP_SITE, entryHost, keyDestinations, stationAddress } from "../src/stations.ts";
 
-test("the only relay is xxchun's, asked for by its names in order", () => {
+test("the only relay is xxchunai's, asked for by its names in order", () => {
   assert.deepEqual(ENTRIES, ["https://api.xxchunai.com", "https://api.xxchun.com"]);
-  assert.deepEqual(DEFAULT_STATION, { id: "xxchun", name: "xxchun", baseUrl: "https://api.xxchunai.com" });
+  assert.deepEqual(DEFAULT_STATION, { id: "xxchun", name: "xxchunai", baseUrl: "https://api.xxchunai.com" });
   assert.equal(stationAddress(DEFAULT_STATION), "api.xxchunai.com");
-  assert.equal(SHOP_SITE, "xxchun.com");
+  assert.equal(SHOP_SITE, "https://xxchunai.com");
 });
 test("the lock line names the address that answered, or every address that may be asked", () => {
   assert.equal(keyDestinations(""), "api.xxchunai.com 或 api.xxchun.com");

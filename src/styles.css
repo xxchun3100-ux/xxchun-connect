@@ -1740,7 +1740,7 @@ strong {
 .setup-options p { overflow-wrap: anywhere; }
 .capability-setting select { min-width: 0; max-width: 100%; }
 
-/* xxchun Connect: the one-screen flow */
+/* xxchunai Connect: the one-screen flow */
 .xc-card { display: grid; gap: 14px; }
 .xc-card .card-heading p { margin: 6px 0 0; }
 .xc-paste { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 60px; font-size: 18px; font-weight: 700; }

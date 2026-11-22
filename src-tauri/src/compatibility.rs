@@ -341,8 +341,8 @@ pub fn next_steps(client: Client) -> Vec<String> {
         ],
         Client::Claude => vec!["退出当前 Claude Code 进程，在新终端重新运行 claude。".into(), "输入 /status，确认 API 地址；使用 /model 检查模型。旧版请先升级。".into()],
         Client::ClaudeVscode => vec!["在 VS Code 执行 Developer: Reload Window，再新建 Claude Code 会话。".into(), "确认使用默认 VS Code Profile；工作区设置可能覆盖用户设置。".into()],
-        Client::CodexDesktop => vec!["完全退出 Codex 桌面应用，再重新打开，新建本地会话。".into(), "确认当前服务为 xxchun Connect，模型与本次选择一致；原官方登录可保留，已有会话或云端任务不会自动迁移。".into()],
-        Client::Codex => vec!["退出当前 Codex 进程并重新运行 codex。".into(), "输入 /status，确认 xxchun Connect 服务和所选模型。桌面版也需重启后生效。".into()],
+        Client::CodexDesktop => vec!["完全退出 Codex 桌面应用，再重新打开，新建本地会话。".into(), "确认当前服务为 xxchunai Connect，模型与本次选择一致；原官方登录可保留，已有会话或云端任务不会自动迁移。".into()],
+        Client::Codex => vec!["退出当前 Codex 进程并重新运行 codex。".into(), "输入 /status，确认 xxchunai Connect 服务和所选模型。桌面版也需重启后生效。".into()],
     }
 }
 
@@ -424,19 +424,19 @@ mod archive_tests {
     #[test]
     fn an_exe_opened_inside_an_archive_viewer_is_recognised_by_its_temporary_path() {
         for path in [
-            "C:\\Users\\a\\AppData\\Local\\Temp\\Rar$EXa1234.5678\\xxchun Connect.exe",
-            "C:\\Users\\a\\AppData\\Local\\Temp\\7zO4A1B2C3D\\xxchun Connect.exe",
-            "C:\\Users\\a\\AppData\\Local\\Temp\\Temp1_xxchun-Connect-0.1.3-Windows-x64-portable.zip\\xxchun Connect.exe",
-            "C:\\Users\\a\\AppData\\Local\\Temp\\BNZ.65a1b2c3\\xxchun Connect.exe",
-            "C:/Users/a/AppData/Local/Temp/360zip$Temp/xxchun Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\Rar$EXa1234.5678\\xxchunai Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\7zO4A1B2C3D\\xxchunai Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\Temp1_xxchunai-Connect-0.1.9-Windows-x64-portable.zip\\xxchunai Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\BNZ.65a1b2c3\\xxchunai Connect.exe",
+            "C:/Users/a/AppData/Local/Temp/360zip$Temp/xxchunai Connect.exe",
         ] {
             assert!(super::runs_from_archive(path), "{path}");
         }
         for path in [
-            "C:\\Users\\a\\Desktop\\xxchun-Connect-0.1.3-Windows-x64-portable\\xxchun Connect.exe",
-            "D:\\tools\\7zip\\xxchun Connect.exe",
-            "C:\\Users\\a\\AppData\\Local\\Temp\\build\\xxchun Connect.exe",
-            "/Applications/xxchun Connect.app/Contents/MacOS/xxchun-connect",
+            "C:\\Users\\a\\Desktop\\xxchunai-Connect-0.1.9-Windows-x64-portable\\xxchunai Connect.exe",
+            "D:\\tools\\7zip\\xxchunai Connect.exe",
+            "C:\\Users\\a\\AppData\\Local\\Temp\\build\\xxchunai Connect.exe",
+            "/Applications/xxchunai Connect.app/Contents/MacOS/xxchun-connect",
             "",
         ] {
             assert!(!super::runs_from_archive(path), "{path}");

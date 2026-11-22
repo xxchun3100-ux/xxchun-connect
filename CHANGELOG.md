@@ -1,3 +1,15 @@
+## xxchunai Connect 0.1.9 — 2026-11-22
+
+商城改名为 xxchunai，网站搬到 xxchunai.com，这个小工具跟着改名叫 **xxchunai Connect**。只改了人看得见的名字，功能和 0.1.8 一样。
+
+- 窗口标题、页面文字、关于框、报错都写 xxchunai；密钥在 `xxchunai.com/account?tab=api`。
+- Windows 包里是 `xxchunai Connect.exe`，Mac 包里是 `xxchunai Connect.app`；下载文件叫 `xxchunai-Connect-<版本>-Windows-x64-portable.zip`、`xxchunai-Connect-<版本>-macOS-arm64.zip`。
+- 写进 Codex / Claude 桌面版配置里的显示名是「xxchunai Connect」。
+- 用 0.1.8 接过的电脑不用做任何事：备份目录（`.xxchun-connect`）、Codex 里的服务 ID（`xxchun-connect`）、模型清单文件名都没动，新版照样认得旧版写的配置，「恢复原配置」照常；再点一次「接到…」只是把显示名换成新的。
+- 接入地址不变：先 `api.xxchunai.com`，再 `api.xxchun.com`。
+
+（下面各版当时叫 xxchun Connect，标题保留原样。）
+
 ## xxchun Connect 0.1.8 — 2026-11-21
 
 （0.1.7 就是上面写的 0.1.3，只是换了版本号，避开上游用过的 v0.1.3–v0.1.6。）

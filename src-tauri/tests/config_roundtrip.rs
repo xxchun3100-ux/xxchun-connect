@@ -45,6 +45,11 @@ fn codex_merge_keeps_comments_mcp_and_permissions_and_restores_login_exactly() {
     assert!(merged.contains("[model_providers.original]"));
     let doc = merged.parse::<toml_edit::DocumentMut>().unwrap();
     assert_eq!(doc["model_provider"].as_str(), Some("xxchun-connect"));
+    // What a person reads is the new name; what the app recognises its own work by is the ID, unchanged since 0.1.1.
+    assert_eq!(
+        doc["model_providers"]["xxchun-connect"]["name"].as_str(),
+        Some("xxchunai Connect")
+    );
     assert_eq!(
         doc["model_providers"]["xxchun-connect"]["base_url"].as_str(),
         Some("https://api.example.test/v1")

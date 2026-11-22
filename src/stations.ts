@@ -1,10 +1,10 @@
-// xxchun Connect has one relay: this shop's. (Upstream kept a list the person could add their own sites to.)
+// xxchunai Connect has one relay: this shop's. (Upstream kept a list the person could add their own sites to.)
 // The relay answers under more than one name, because some networks reset connections by the name asked for.
 // The native side tries them in this order and writes the one that answered into the client's configuration;
 // src-tauri/src/models.rs has the same list (BUILT_IN_ENTRIES), and a test compares the two.
 export const ENTRIES = ["https://api.xxchunai.com", "https://api.xxchun.com"];
-// Where people get their key and the tutorial. The shop itself is still served only under this name.
-export const SHOP_SITE = "xxchun.com";
+// Where people get their key and the tutorial (the shop moved from xxchun.com to xxchunai.com with its new name).
+export const SHOP_SITE = "https://xxchunai.com";
 export interface Station {
   id: string;
   name: string;
@@ -12,7 +12,7 @@ export interface Station {
 }
 export const DEFAULT_STATION: Station = {
   id: "xxchun",
-  name: "xxchun",
+  name: "xxchunai",
   baseUrl: ENTRIES[0],
 };
 export const entryHost = (url: string) => url.replace(/^https?:\/\//, "");

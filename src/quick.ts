@@ -3,7 +3,7 @@ import { clientFamily, modelSelectable } from "./clients.ts";
 import { MAX_MODELS } from "./selection.ts";
 import type { Client } from "./native";
 
-export const KEY_HELP = "这不是完整的密钥。回到 xxchun 的接入教程，点『复制我的密钥』，再回来点『粘贴密钥』。";
+export const KEY_HELP = "这不是完整的密钥。回到 xxchunai 的接入教程，点『复制我的密钥』，再回来点『粘贴密钥』。";
 export const KEY_MASKED = "你复制的是打了码的密钥（中间是点），不能用。";
 // Spaces and quotes around a key come from copying it; they are not part of it.
 export const cleanKey = (text: string) => text.replace(/^[\s"'`“”‘’]+|[\s"'`“”‘’]+$/g, "");

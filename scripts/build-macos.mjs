@@ -18,7 +18,7 @@ function run(command, args, options = {}) {
 run(process.execPath, [path.join(root, 'node_modules/@tauri-apps/cli/tauri.js'),
   'build', '--target', target, '--bundles', 'app', '--', '--locked']);
 
-const source = path.join(root, 'src-tauri/target', target, 'release/bundle/macos/xxchun Connect.app');
+const source = path.join(root, 'src-tauri/target', target, 'release/bundle/macos/xxchunai Connect.app');
 const actual = run('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', path.join(source, 'Contents/Info.plist')],
   { encoding: 'utf8', stdio: 'pipe' }).trim();
 if (actual !== version) throw new Error('App version does not match package.json');
@@ -30,29 +30,29 @@ const release = path.join(root, 'release');
 fs.mkdirSync(release, { recursive: true });
 const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'xxchun-macos-package-'));
 try {
-  const folder = path.join(stage, 'xxchun Connect');
+  const folder = path.join(stage, 'xxchunai Connect');
   fs.mkdirSync(folder);
-  const app = path.join(folder, 'xxchun Connect.app');
+  const app = path.join(folder, 'xxchunai Connect.app');
   run('/usr/bin/ditto', [source, app]);
   fs.copyFileSync(path.join(root, 'LICENSE'), path.join(app, 'Contents/Resources/LICENSE.txt'));
   fs.copyFileSync(path.join(root, 'LICENSE'), path.join(folder, 'LICENSE.txt'));
   fs.cpSync(path.join(root, 'licenses'), path.join(folder, 'licenses'), { recursive: true });
   run('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app]);
   run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
-  fs.writeFileSync(path.join(folder, 'README.txt'), `xxchun Connect ${version} · macOS Apple Silicon
+  fs.writeFileSync(path.join(folder, 'README.txt'), `xxchunai Connect ${version} · macOS Apple Silicon
 
-解压后打开 xxchun Connect.app，也可拖入「应用程序」文件夹。
-点「粘贴密钥」（密钥在 xxchun.com 的「我的 Token › 接入教程」里复制）→ 点「接到 Claude」或「接到 Codex」。
+解压后打开 xxchunai Connect.app，也可拖入「应用程序」文件夹。
+点「粘贴密钥」（密钥在 xxchunai.com 的「我的 Token › 接入教程」里复制）→ 点「接到 Claude」或「接到 Codex」。
 导入后完全退出目标客户端，再重新打开并新建会话。
 如需撤回，点右上角「恢复原配置」。
 
 当前包使用 ad-hoc 签名，尚未完成 Apple Developer ID 签名及公证。
-若系统拦截，请先确认是从 xxchun.com 的接入教程下载的，再按系统提示处理。
+若系统拦截，请先确认是从 xxchunai.com 的接入教程下载的，再按系统提示处理。
 
 本工具基于开源项目 SuperGPT Connect（MIT）：https://github.com/superpilot69/supergpt-connect
 许可见同一文件夹里的 LICENSE 和 licenses。
 `);
-  const name = `xxchun-Connect-${version}-macOS-arm64.zip`;
+  const name = `xxchunai-Connect-${version}-macOS-arm64.zip`;
   const archive = path.join(stage, name);
   run('/usr/bin/ditto', ['-c', '-k', '--norsrc', '--keepParent', folder, archive]);
   fs.copyFileSync(archive, path.join(release, name));

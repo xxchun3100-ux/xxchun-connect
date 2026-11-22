@@ -55,6 +55,10 @@ fn desktop_activates_gateway_all_four_files_and_restores_existing_profiles() {
         read(&paths, FileKind::ClaudeDesktopMeta)["entries"][0],
         json!({"id":"work","name":"Work","extra":true})
     );
+    assert_eq!(
+        read(&paths, FileKind::ClaudeDesktopMeta)["entries"][1],
+        json!({"id":PROFILE_ID,"name":"xxchunai Connect"})
+    );
     for kind in [FileKind::ClaudeDesktopConfig, FileKind::ClaudeThreepConfig] {
         assert_eq!(read(&paths, kind)["deploymentMode"], "3p");
     }

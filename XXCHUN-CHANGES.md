@@ -1,6 +1,6 @@
-# xxchun Connect：相对上游改了什么
+# xxchunai Connect：相对上游改了什么
 
-上游：https://github.com/superpilot69/supergpt-connect ，tag `v0.1.6`（提交 65c260e）。本分支版本 0.1.8。
+上游：https://github.com/superpilot69/supergpt-connect ，tag `v0.1.6`（提交 65c260e）。本分支版本 0.1.9。0.1.9 起显示名是 xxchunai Connect（见文末「0.1.9」），下面 0.1.8 及以前各节里的「xxchun Connect」「xxchun-Connect」「连不上 xxchun（…）」是当时的写法，保留原样。
 
 ## 没有在这台机器上验证的
 
@@ -170,3 +170,43 @@
 - `tests/stations.test.ts`：地址顺序、锁那一行的文字、和 Rust 清单一致。
 
 没有验证的：Rust 仍然没在这台机器上编译；没有从中国移动的网络上实际跑过这个版本；`connect-entries.json` 只有单元测试，没有对着真服务器试过。
+
+## 0.1.9：显示名改成 xxchunai Connect
+
+商城从「xxchun」改名「xxchunai」，网站从 xxchun.com 搬到 xxchunai.com。这一版只改人看得见的名字，逻辑没有动。
+
+### 改了的（人看得见的）
+
+- `src-tauri/tauri.conf.json`：`productName` 和窗口 `title` → `xxchunai Connect`（Mac 的 `.app` 名字由 `productName` 决定，所以打出来是 `xxchunai Connect.app`）。`index.html` 的 `<title>` 同。
+- `src/App.tsx`：左上角字标、页脚、关于框、成功页「已经接到 xxchunai」、两句报错。`src/quick.ts` 和 `models.rs` 的 `KEY_HELP`（「回到 xxchunai 的接入教程」，两处要一字不差）。
+- `src/stations.ts`：`SHOP_SITE` → `https://xxchunai.com`；页面上显示的密钥地址用 `entryHost(SHOP_SITE)`，即 `xxchunai.com/account?tab=api`。`DEFAULT_STATION.name` → `xxchunai`（`id` 仍是 `xxchun`）。`ENTRIES` 没动。
+- `src-tauri/src/models.rs`：「连不上 xxchunai（…）」「连接 xxchunai（…）超时了」。`lib.rs`：启动失败弹窗的标题和两句话。`compatibility.rs`：接入后的两句「确认当前服务为 xxchunai Connect」。
+- `src-tauri/src/adapter.rs`：写进 Codex `[model_providers.xxchun-connect]` 的 `name` → `xxchunai Connect`。`desktop_config.rs`：写进 Claude 桌面版 `_meta.json` 的配置名 → `xxchunai Connect`。
+- `scripts/build-windows-portable.mjs`、`scripts/build-macos.mjs`：包内文件夹、`xxchunai Connect.exe`、`xxchunai Connect.app`、说明文字（网址也换成 xxchunai.com）、压缩包名 `xxchunai-Connect-<版本>-…zip`。
+- `.github/workflows/release.yml`、`ci/build.yml`：工作流名、artifact 名、Release 标题。
+- `README.md`、`NOTICE.md`、`package.json` 的 description、本文件标题。上游的署名和许可文字没动。
+
+### 故意没改的（改了会让已经装过的那份找不到自己写的东西）
+
+- Tauri 的 `identifier`（`com.xxchun.connect`）：WebView 的数据目录跟着它走。
+- Cargo 的包名、可执行文件名、库名（`xxchun-connect`、`xxchun_connect_lib`）：Windows 上看到的 exe 名字是打包脚本复制时起的，和 crate 名无关；Mac 的 `.app` 里面那个可执行文件仍叫 `xxchun-connect`（在 `Contents/MacOS/` 里，一般人看不到）。
+- 备份目录 `~/.xxchun-connect`、`xxchun-connect-models.json`、清单里的 `_xxchun_connect`、能力文档的 `xxchun.connect_capabilities`、`localStorage` 的 `xxchun-connect.theme`、测试环境变量 `XXCHUN_CONNECT_TEST_HOME`。
+- Codex 的 `model_provider = "xxchun-connect"` 和 `[model_providers.xxchun-connect]`，Claude 桌面版的 profile ID。
+- 密钥格式 `sk-xc-` + 32 位；GitHub 仓库名；`public/xxchun.png` 这个文件名；`connect-entries.json` 的白名单（`xxchunai.com`、`xxchun.com`）。
+- `CHANGELOG.md` 里 0.1.8 及以前的标题、本文件前面各节：是当时的记录。
+
+### 旧配置（0.1.8 写的）怎么认
+
+查过所有比较：应用**从来不按显示名认自己的配置**。认的是三样，这一版都没动：`~/.xxchun-connect/<客户端>.backup.json` 这份恢复记录（有它就算「接过」，里面存着接入前的原文和接入后内容的哈希）、Codex 的 provider ID `xxchun-connect`（`adapter.rs` 判断是不是同一条线路时用）、Claude 桌面版的 `PROFILE_ID`（`desktop_config.rs` 找自己那一条时用）。所以没有「新旧两个名字都接受」的代码要加——没有任何一处在比名字。
+
+- 0.1.8 接过的电脑直接点「恢复原配置」：记录里的哈希对得上 0.1.8 写的内容，原样恢复。
+- 不恢复、直接再点一次「接到…」：同一个 ID 下的 `name` 被改成新名字，不会多出第二个 provider / 第二条桌面配置；恢复记录里「接入前」那份保持最初的，之后恢复回到的仍是最初的配置。
+
+### 测试
+
+- `tests/restore_roundtrip.rs` 新增三个（`connect_as_0_1_8` 把目录摆成 0.1.8 接完之后的样子：文件里是旧名字，恢复记录按旧内容生成）：Codex 旧配置被认出、没有被标成「改动过」、恢复成原文；Codex 旧配置上再接一次，ID 不变、名字换新、恢复点时间不变、恢复成原文；Claude 桌面版同样的一整套（`_meta.json` 里仍是两条，自己那条改名）。
+- `tests/config_roundtrip.rs`、`tests/desktop_roundtrip.rs`：新接入写的是新名字 + 旧 ID。
+- 跟着文字改的断言：`models.rs` 里「连不上 / 连接 xxchunai（…）」五处，`tests/model_discovery.rs` 两处，`compatibility.rs` 里压缩包路径的样例，`tests/quick.test.ts`、`tests/stations.test.ts`、`tests/brand.test.mjs`。
+- `tests/brand.test.mjs` 新增一条：`src/`、`src-tauri/src/`、打包脚本、工作流里不再出现旧显示名（`adapter.rs` 里解释兼容的那句注释除外），并且 ID 和目录名还在。
+
+没有验证的：Rust 仍只在 GitHub Actions 上编译和测试；打出来的两个包没有人实际打开过；没有拿一台真的装过 0.1.8 的电脑试过升级（只有上面的测试）。

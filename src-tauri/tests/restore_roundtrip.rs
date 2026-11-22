@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use xxchun_connect_lib::{
     adapter,
+    desktop_config::PROFILE_ID,
     models::{Client, ValidatedInput},
     restore::{self, RestorePoint},
     storage::{self, FileKind, Paths},
@@ -282,4 +283,150 @@ fn vscode_restore_returns_both_shared_settings_and_jsonc_exactly() {
     );
     assert_eq!(read(&paths, FileKind::ClaudeSettings), settings);
     assert_eq!(read(&paths, FileKind::ClaudeVscode), vscode);
+}
+
+// 0.1.9 changed only what a person reads: the name written next to the configuration is "xxchunai Connect" where
+// 0.1.8 wrote "xxchun Connect". What the app recognises its own work by did not change: the Codex provider ID
+// `xxchun-connect`, the Claude desktop profile ID, and the restore record in `.xxchun-connect`.
+const NAME_0_1_8: &str = "xxchun Connect";
+const NAME_NOW: &str = "xxchunai Connect";
+
+/// Leaves the home as 0.1.8 left it after a connect: the same files with the name that version wrote, and the
+/// restore record that version saved for them.
+fn connect_as_0_1_8(paths: &Paths, kinds: &[FileKind], input: ValidatedInput) {
+    let client = input.client;
+    let resolved = paths.for_client(client).unwrap();
+    let snapshot = |rename: bool| -> Vec<Option<String>> {
+        kinds
+            .iter()
+            .map(|kind| {
+                let text = storage::read_optional(&resolved.target(*kind)).unwrap();
+                if rename {
+                    text.map(|text| text.replace(NAME_NOW, NAME_0_1_8))
+                } else {
+                    text
+                }
+            })
+            .collect()
+    };
+    let before = snapshot(false);
+    adapter::apply(paths, input).unwrap();
+    let after = snapshot(true);
+    storage::restore(paths, client).unwrap();
+    assert_eq!(snapshot(false), before);
+    let changes: Vec<storage::Change> = kinds
+        .iter()
+        .zip(before)
+        .zip(after)
+        .filter_map(|((kind, before), after)| {
+            after.map(|after| storage::Change {
+                kind: *kind,
+                before,
+                after,
+            })
+        })
+        .collect();
+    assert!(storage::commit(&resolved, client, changes).unwrap());
+}
+
+const CODEX_FILES: [FileKind; 3] = [
+    FileKind::CodexConfig,
+    FileKind::CodexAuth,
+    FileKind::CodexCatalog,
+];
+const DESKTOP_FILES: [FileKind; 4] = [
+    FileKind::ClaudeDesktopProfile,
+    FileKind::ClaudeDesktopMeta,
+    FileKind::ClaudeThreepConfig,
+    FileKind::ClaudeDesktopConfig,
+];
+
+#[test]
+fn a_codex_connection_made_by_0_1_8_is_recognised_and_restored() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::for_home(home.path());
+    let config = "# original user comment\nmodel = \"original\"\n";
+    let auth = "{\n  \"tokens\": {\"refresh_token\": \"fake-original-oauth\"}\n}\n";
+    write(&paths, FileKind::CodexConfig, config);
+    write(&paths, FileKind::CodexAuth, auth);
+    connect_as_0_1_8(&paths, &CODEX_FILES, input(Client::Codex, "one"));
+    let old = read(&paths, FileKind::CodexConfig);
+    let doc = old.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(doc["model_provider"].as_str(), Some("xxchun-connect"));
+    assert_eq!(
+        doc["model_providers"]["xxchun-connect"]["name"].as_str(),
+        Some(NAME_0_1_8)
+    );
+    assert!(!old.contains(NAME_NOW));
+    let preview = point(&paths, Client::Codex);
+    assert!(preview.available);
+    assert!(!preview.pending);
+    assert!(preview.files.iter().all(|file| !file.modified_since_import));
+    assert_eq!(restore(&paths, Client::Codex, false).restored_files, 1);
+    assert_eq!(read(&paths, FileKind::CodexConfig), config);
+    assert_eq!(read(&paths, FileKind::CodexAuth), auth);
+    assert!(!paths.has_backup(Client::Codex));
+}
+
+#[test]
+fn connecting_codex_again_over_0_1_8_renames_in_place_and_still_restores_the_original() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::for_home(home.path());
+    let config = "# original user comment\nmodel = \"original\"\n";
+    write(&paths, FileKind::CodexConfig, config);
+    connect_as_0_1_8(&paths, &CODEX_FILES, input(Client::Codex, "one"));
+    let first_timestamp = point(&paths, Client::Codex).created_at;
+    let result = adapter::apply(&paths, input(Client::Codex, "one")).unwrap();
+    assert!(result.changed);
+    let now = read(&paths, FileKind::CodexConfig);
+    let doc = now.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(doc["model_provider"].as_str(), Some("xxchun-connect"));
+    assert_eq!(
+        doc["model_providers"]["xxchun-connect"]["name"].as_str(),
+        Some(NAME_NOW)
+    );
+    assert!(!now.contains(&format!("\"{NAME_0_1_8}\"")));
+    let preview = point(&paths, Client::Codex);
+    assert_eq!(preview.created_at, first_timestamp);
+    assert!(preview.files.iter().all(|file| !file.modified_since_import));
+    restore(&paths, Client::Codex, false);
+    assert_eq!(read(&paths, FileKind::CodexConfig), config);
+    assert!(!paths.has_backup(Client::Codex));
+}
+
+#[test]
+fn a_claude_desktop_connection_made_by_0_1_8_is_recognised_renamed_in_place_and_restored() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::for_home(home.path());
+    let original = "{\"deploymentMode\":\"1p\",\"preferences\":{\"theme\":\"dark\"}}\n";
+    let meta = "{\"entries\":[{\"id\":\"work\",\"name\":\"Work\"}],\"appliedId\":\"work\"}";
+    write(&paths, FileKind::ClaudeDesktopConfig, original);
+    write(&paths, FileKind::ClaudeDesktopMeta, meta);
+    connect_as_0_1_8(&paths, &DESKTOP_FILES, input(Client::ClaudeDesktop, "one"));
+    let entries = |paths: &Paths| -> Value {
+        let meta: Value =
+            serde_json::from_str(&read(paths, FileKind::ClaudeDesktopMeta)).unwrap();
+        assert_eq!(meta["appliedId"], PROFILE_ID);
+        meta["entries"].clone()
+    };
+    assert_eq!(
+        entries(&paths),
+        json!([{"id":"work","name":"Work"},{"id":PROFILE_ID,"name":NAME_0_1_8}])
+    );
+    let preview = point(&paths, Client::ClaudeDesktop);
+    assert!(preview.available);
+    assert_eq!(preview.files.len(), 4);
+    assert!(preview.files.iter().all(|file| !file.modified_since_import));
+    let result = adapter::apply(&paths, input(Client::ClaudeDesktop, "one")).unwrap();
+    assert!(result.changed);
+    assert_eq!(
+        entries(&paths),
+        json!([{"id":"work","name":"Work"},{"id":PROFILE_ID,"name":NAME_NOW}])
+    );
+    let result = restore(&paths, Client::ClaudeDesktop, false);
+    assert_eq!(result.restored_files, 4);
+    assert_eq!(read(&paths, FileKind::ClaudeDesktopConfig), original);
+    assert_eq!(read(&paths, FileKind::ClaudeDesktopMeta), meta);
+    assert!(!paths.target(FileKind::ClaudeDesktopProfile).exists());
+    assert!(!paths.target(FileKind::ClaudeThreepConfig).exists());
 }

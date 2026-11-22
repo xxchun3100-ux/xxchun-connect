@@ -21,6 +21,6 @@ test("a key with nothing for this tool says to copy the key again", () => {
   assert.equal(wrongKeyMessage("claude-vscode"), "这把密钥用不了 Claude 的模型。回教程页重新点一次『复制我的密钥』。");
 });
 test("an error is split into what to do and the technical cause", () => {
-  assert.deepEqual(splitError("连不上 xxchun（api.xxchun.com）。请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。\nconnect: refused"), { message: "连不上 xxchun（api.xxchun.com）。请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。", detail: "connect: refused" });
+  assert.deepEqual(splitError("连不上 xxchunai（api.xxchun.com）。请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。\nconnect: refused"), { message: "连不上 xxchunai（api.xxchun.com）。请暂时关掉代理/VPN 和杀毒软件的\"HTTPS 扫描/网页防护\"再试，或换个网络。", detail: "connect: refused" });
   assert.deepEqual(splitError("密钥未通过验证，请检查是否复制完整。"), { message: "密钥未通过验证，请检查是否复制完整。", detail: "" });
 });

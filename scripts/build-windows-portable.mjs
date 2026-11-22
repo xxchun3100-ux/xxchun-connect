@@ -59,21 +59,21 @@ if (extraRuntime.length) throw new Error(`Portable EXE still requires unbundled 
 const release = path.join(root, 'release');
 fs.mkdirSync(release, { recursive: true });
 const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'xxchun-windows-package-'));
-const folder = path.join(stage, 'xxchun Connect');
-const archiveName = `xxchun-Connect-${version}-Windows-x64-portable.zip`;
+const folder = path.join(stage, 'xxchunai Connect');
+const archiveName = `xxchunai-Connect-${version}-Windows-x64-portable.zip`;
 try {
   fs.mkdirSync(folder);
-  fs.copyFileSync(executable, path.join(folder, 'xxchun Connect.exe'));
+  fs.copyFileSync(executable, path.join(folder, 'xxchunai Connect.exe'));
   fs.copyFileSync(path.join(root, 'LICENSE'), path.join(folder, 'LICENSE.txt'));
   fs.cpSync(path.join(root, 'licenses'), path.join(folder, 'licenses'), { recursive: true });
-  const instructions = `xxchun Connect ${version} · Windows 免安装版
+  const instructions = `xxchunai Connect ${version} · Windows 免安装版
 
 适用：Windows 10 / 11，64 位 Intel / AMD 电脑。
 
 使用方法
 1. 先把整个压缩包解压到一个文件夹。
-2. 双击「xxchun Connect.exe」。无需管理员权限，无需安装 Node.js 或 Rust。
-3. 点「粘贴密钥」（密钥在 xxchun.com 的「我的 Token › 接入教程」里复制）→ 点「接到 Claude」或「接到 Codex」。
+2. 双击「xxchunai Connect.exe」。无需管理员权限，无需安装 Node.js 或 Rust。
+3. 点「粘贴密钥」（密钥在 xxchunai.com 的「我的 Token › 接入教程」里复制）→ 点「接到 Claude」或「接到 Codex」。
 4. 完全退出 Claude / Codex 后重新打开，再新建会话。
    Claude 如留在系统托盘中，请从托盘菜单退出。
 5. 如需撤回，点右上角「恢复原配置」，选择客户端后点「恢复」。
@@ -106,9 +106,9 @@ WSL、远程开发环境有自己的配置，须在对应环境另行设置。
     // Git Bash also ships a GNU tar.exe, which treats a drive letter as a remote
     // host and cannot create ZIPs. Use Windows' libarchive tar explicitly.
     const windowsTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
-    run(windowsTar, ['-a', '-cf', archiveName, 'xxchun Connect'], stage);
+    run(windowsTar, ['-a', '-cf', archiveName, 'xxchunai Connect'], stage);
   } else {
-    run('zip', ['-q', '-r', stagedArchive, 'xxchun Connect'], stage);
+    run('zip', ['-q', '-r', stagedArchive, 'xxchunai Connect'], stage);
   }
   fs.copyFileSync(stagedArchive, path.join(release, archiveName));
   const hashes = fs.readdirSync(release).filter(name => name.endsWith('.zip')).sort()

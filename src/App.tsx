@@ -1,4 +1,4 @@
-// xxchun Connect: the upstream wizard (pick a relay → pick a client → key → pick models → import) cut down to what a
+// xxchunai Connect: the upstream wizard (pick a relay → pick a client → key → pick models → import) cut down to what a
 // beginner of this shop needs: paste the key, press 「接到 Claude」 or 「接到 Codex」, restart the client. The relay is
 // always this shop's; the models are fetched and chosen by the app (every model the key offers that the client can
 // use). The native side (discover → preview → import, restore) is upstream's, unchanged.
@@ -12,7 +12,7 @@ import RestorePanel from "./RestorePanel";
 import { DEFAULT_OPTIONS, selectedOptions } from "./setup-options";
 import { version } from "../package.json";
 
-export const SHOP_KEY_PAGE = `${SHOP_SITE}/account?tab=api`;
+export const SHOP_KEY_PAGE = `${entryHost(SHOP_SITE)}/account?tab=api`;
 const MAIN: Client[] = ["claude-desktop", "codex-desktop"];
 const MORE: Client[] = ["claude", "claude-vscode", "codex"];
 const PASTE_TIP = "在下面的框里点一下，按 Ctrl+V（Mac 按 ⌘V）粘贴。";
@@ -66,7 +66,7 @@ export default function App() {
   const pending = status?.clients.some((item) => item.pending) ?? false;
 
   async function refresh() { if (nativeAvailable) setStatus(await readStatus()); }
-  useEffect(() => { refresh().catch(() => setError("无法读取电脑上的状态，请重新打开 xxchun Connect。")); }, []);
+  useEffect(() => { refresh().catch(() => setError("无法读取电脑上的状态，请重新打开 xxchunai Connect。")); }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     try { localStorage.setItem("xxchun-connect.theme", theme); } catch { /* this session still has the theme */ }
@@ -92,7 +92,7 @@ export default function App() {
     const problem = keyProblem(apiKey);
     if (problem) { setHint(problem); field.current?.focus(); return; }
     setError(""); setRetry(null); setHint(""); setResult(null); setRestored(false);
-    if (!nativeAvailable) { setError("这是界面预览，要在 xxchun Connect 应用里才能接入。"); return; }
+    if (!nativeAvailable) { setError("这是界面预览，要在 xxchunai Connect 应用里才能接入。"); return; }
     running.current = true; setBusy(client); setSlow(false);
     // The native side retries by itself for a while (it has no channel to report progress on).
     const waiting = window.setTimeout(() => setSlow(true), 2500);
@@ -126,7 +126,7 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="app-header">
-        <div className="brand"><BrandIcon /><span className="brand-wordmark">xxchun</span><span className="brand-divider" /><span className="brand-product">Connect</span></div>
+        <div className="brand"><BrandIcon /><span className="brand-wordmark">xxchunai</span><span className="brand-divider" /><span className="brand-product">Connect</span></div>
         <div className="header-actions">
           <button className="restore-header-button" onClick={() => setShowRestore(true)} disabled={disabled}><RotateCcw size={15} /><span>恢复原配置</span></button>
           <button className="icon-button theme-button" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={theme === "light" ? "切换深色外观" : "切换浅色外观"}>{theme === "light" ? <Moon size={17} /> : <Sun size={17} />}</button>
@@ -140,7 +140,7 @@ export default function App() {
             <div className="success-content" role="status">
               <span className="success-mark"><Check size={28} strokeWidth={1.7} /></span>
               <h2 id="step-title" ref={heading} tabIndex={-1}>好了，完全退出 {shortName(result.client)} 再打开</h2>
-              <p>{done.name} 已经接到 xxchun。只关窗口不算退出。</p>
+              <p>{done.name} 已经接到 xxchunai。只关窗口不算退出。</p>
               <p className="xc-via-system">接入地址：{entryHost(result.baseUrl)}{viaSystem && " · 已通过系统网络连接"}</p>
               <div className="activation-guide">
                 <strong>接下来</strong>
@@ -185,11 +185,11 @@ export default function App() {
           )}
         </section>
       </div>
-      <footer className="app-footer"><span>xxchun Connect</span><button onClick={() => setAbout(true)} className="version-button">v{version} <span>·</span> 关于</button></footer>
+      <footer className="app-footer"><span>xxchunai Connect</span><button onClick={() => setAbout(true)} className="version-button">v{version} <span>·</span> 关于</button></footer>
       {showRestore && <RestorePanel initialClient={result?.client ?? "claude-desktop"} onClose={() => setShowRestore(false)} onRestored={async () => { setResult(null); setRestored(true); await refresh(); }} />}
       {about && (
-        <Modal title="xxchun Connect" close={() => setAbout(false)}>
-          <p className="dialog-intro">v{version} · xxchun 的本地接入小工具</p>
+        <Modal title="xxchunai Connect" close={() => setAbout(false)}>
+          <p className="dialog-intro">v{version} · xxchunai 的本地接入小工具</p>
           <p className="about-copy">基于开源项目 SuperGPT Connect（MIT，github.com/superpilot69/supergpt-connect），其配置引擎来自 CC Switch（MIT，原作者 Jason Young）。完整许可随应用附带。</p>
           <p className="about-copy">密钥只用于向 {keyDestinations("")} 读取模型，以及写进你电脑上的客户端配置；不保存在这个应用里。</p>
           <div className="dialog-actions"><button className="primary-button" onClick={() => setAbout(false)}>知道了</button></div>

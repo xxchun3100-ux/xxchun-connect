@@ -162,7 +162,7 @@ mod desktop {
         #[cfg(windows)]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
-            let title: Vec<u16> = "xxchun Connect\0".encode_utf16().collect();
+            let title: Vec<u16> = "xxchunai Connect\0".encode_utf16().collect();
             let body: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
             // Both buffers are NUL-terminated and remain alive during the synchronous dialog.
             unsafe {
@@ -181,7 +181,7 @@ mod desktop {
     pub fn run() {
         #[cfg(windows)]
         if tauri::webview_version().is_err() {
-            startup_error("此电脑缺少 Microsoft Edge WebView2 Runtime，暂时无法打开窗口。\n\n请按压缩包内《使用说明》的链接安装 WebView2，然后重新打开 xxchun Connect。连接器本身无需安装。");
+            startup_error("此电脑缺少 Microsoft Edge WebView2 Runtime，暂时无法打开窗口。\n\n请按压缩包内《使用说明》的链接安装 WebView2，然后重新打开 xxchunai Connect。连接器本身无需安装。");
         }
         let paths = storage::Paths::discover().unwrap_or_else(|error| startup_error(&error));
         if let Err(error) = tauri::Builder::default()
@@ -200,7 +200,7 @@ mod desktop {
             ])
             .run(tauri::generate_context!())
         {
-            startup_error(&format!("无法启动 xxchun Connect：{error}"));
+            startup_error(&format!("无法启动 xxchunai Connect：{error}"));
         }
     }
 }

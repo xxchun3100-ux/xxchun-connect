@@ -283,7 +283,7 @@ async fn when_no_entry_answers_nothing_is_chosen_and_each_entry_tried_is_named()
         .err()
         .unwrap();
     let (advice, detail) = error.split_once('\n').unwrap();
-    assert!(advice.contains("xxchun（127.0.0.1、127.0.0.1）"));
+    assert!(advice.contains("xxchunai（127.0.0.1、127.0.0.1）"));
     assert!(detail.starts_with("试了 2 次："));
     assert_eq!(detail.matches("127.0.0.1 — 不走代理：").count(), 2);
     assert!(!error.contains("sk-xc-"));
@@ -342,7 +342,7 @@ async fn an_unreachable_api_is_tried_every_way_and_explains_itself() {
         .err()
         .unwrap();
     let (advice, detail) = error.split_once('\n').unwrap();
-    assert!(advice.contains("xxchun（127.0.0.1）"));
+    assert!(advice.contains("xxchunai（127.0.0.1）"));
     assert!(advice.contains("请暂时关掉代理/VPN"));
     assert!(detail.starts_with("试了 "));
     assert!(detail.contains("系统网络设置：") && detail.contains("不走代理："));

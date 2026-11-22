@@ -115,7 +115,9 @@ pub fn apply(paths: &Paths, input: ValidatedInput) -> Result<ImportResult, Strin
                 );
             }
             let mut provider = Table::new();
-            provider.insert("name", value("xxchun Connect"));
+            // Only this name is for people. Restore and re-connect go by the ID `xxchun-connect` below, so a configuration
+            // written by 0.1.8 (name "xxchun Connect") is still this app's own and is renamed in place.
+            provider.insert("name", value("xxchunai Connect"));
             provider.insert("base_url", value(format!("{}/v1", input.root)));
             provider.insert("wire_api", value("responses"));
             // Bind credentials to this route; never replace or forward the user's official login.
