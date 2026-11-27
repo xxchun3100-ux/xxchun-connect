@@ -7,7 +7,7 @@ import { Check, CircleAlert, ClipboardPaste, Eye, EyeOff, KeyRound, LoaderCircle
 import { discoverModels, importConfig, nativeAvailable, previewConfig, readStatus, type Client, type ImportResult, type SelectionInput, type Status } from "./native";
 import { DEFAULT_STATION, SHOP_SITE, entryHost, keyDestinations } from "./stations";
 import { clients, clientFamily } from "./clients";
-import { cleanKey, keyConfirmation, keyProblem, pickModels, splitError, wrongKeyMessage } from "./quick";
+import { cleanKey, DEFAULT_MODEL_NOTE, DEFAULT_MODEL_QUESTION, keyConfirmation, keyProblem, modelChoices, splitError, wrongKeyMessage, type ModelOffer } from "./quick";
 import RestorePanel from "./RestorePanel";
 import { DEFAULT_OPTIONS, selectedOptions } from "./setup-options";
 import { version } from "../package.json";
@@ -58,6 +58,8 @@ export default function App() {
   const [more, setMore] = useState(false);
   const [showRestore, setShowRestore] = useState(false);
   const [restored, setRestored] = useState(false);
+  // 0.1.10: after the key was read, the customer chooses the model the tool starts with (one is preselected).
+  const [choice, setChoice] = useState<{ client: Client; discoveryId: string; ids: string[]; offers: ModelOffer[]; picked: string } | null>(null);
   const [about, setAbout] = useState(false);
   const field = useRef<HTMLInputElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -71,7 +73,7 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     try { localStorage.setItem("xxchun-connect.theme", theme); } catch { /* this session still has the theme */ }
   }, [theme]);
-  useEffect(() => { window.scrollTo({ top: 0 }); heading.current?.focus({ preventScroll: true }); }, [result]);
+  useEffect(() => { window.scrollTo({ top: 0 }); heading.current?.focus({ preventScroll: true }); }, [result, choice === null]);
 
   // 「粘贴」: the key copied on the shop's page. Where the system does not let the app read the clipboard, the field
   // is focused and the person presses Ctrl+V / ⌘V themselves.
@@ -82,7 +84,7 @@ export default function App() {
       if (!text) { setHint("剪贴板是空的。先到网站点「复制我的密钥」。"); field.current?.focus(); return; }
       const problem = keyProblem(text);
       if (problem) { setHint(problem); return; }
-      setApiKey(cleanKey(text)); setResult(null); setRestored(false);
+      setApiKey(cleanKey(text)); setResult(null); setRestored(false); setChoice(null);
     } catch { setHint(PASTE_TIP); field.current?.focus(); }
   }
   async function connect(client: Client) {
@@ -99,16 +101,29 @@ export default function App() {
     try {
       const found = await discoverModels({ client, baseUrl: DEFAULT_STATION.baseUrl, apiKey: cleanKey(apiKey) });
       window.clearTimeout(waiting); setSlow(false); setViaSystem(found.viaSystemNetwork === true); setEntry(found.baseUrl);
-      const chosen = pickModels(client, found.models.map((model) => model.id).filter((id) => clientFamily(client) === "codex" || found.capabilities?.models[id]?.messages.status !== "unsupported"));
+      const chosen = modelChoices(client, found.models, (id) => clientFamily(client) === "codex" || found.capabilities?.models[id]?.messages.status !== "unsupported");
       if (!chosen.ids.length) { setError(wrongKeyMessage(client)); return; }
-      const input: SelectionInput = { discoveryId: found.discoveryId, selectedModels: chosen.ids, defaultModel: chosen.defaultId, toolSearch: "auto", options: selectedOptions(client, chosen.ids, DEFAULT_OPTIONS) };
-      const preview = await previewConfig(input);
-      if (preview.blocked) { setError(preview.blocked); return; }
-      setResult(await importConfig(input));
-      try { await refresh(); } catch { /* the import itself is done */ }
+      // Nothing is written yet: the next screen asks which model to start with.
+      setChoice({ client, discoveryId: found.discoveryId, ids: chosen.ids, offers: chosen.choices, picked: chosen.recommendedId });
     } catch (reason) {
       setError(typeof reason === "string" ? reason : "没接上，请稍后再试。"); setRetry(client);
     } finally { window.clearTimeout(waiting); running.current = false; setBusy(null); setSlow(false); }
+  }
+  // The confirm button of the model step: every usable model is written, the chosen one as the default.
+  async function writeChoice() {
+    if (!choice || disabled || running.current) return;
+    setError(""); setRetry(null);
+    running.current = true; setBusy(choice.client);
+    try {
+      const input: SelectionInput = { discoveryId: choice.discoveryId, selectedModels: choice.ids, defaultModel: choice.picked, toolSearch: "auto", options: selectedOptions(choice.client, choice.ids, DEFAULT_OPTIONS) };
+      const preview = await previewConfig(input);
+      if (preview.blocked) { setError(preview.blocked); return; }
+      setResult(await importConfig(input)); setChoice(null);
+      try { await refresh(); } catch { /* the import itself is done */ }
+    } catch (reason) {
+      // (what was read from the key may have expired meanwhile: back to the first screen, where one click reads it again)
+      setError(typeof reason === "string" ? reason : "没接上，请稍后再试。"); setRetry(choice.client); setChoice(null);
+    } finally { running.current = false; setBusy(null); }
   }
   const target = (client: Client, big: boolean) => {
     const info = clients.find((item) => item.id === client)!, state = status?.clients.find((item) => item.client === client);
@@ -149,6 +164,22 @@ export default function App() {
               </div>
               {result.warnings.length > 0 && <details className="compatibility-details"><summary>兼容性提示</summary>{result.warnings.map((text) => <p key={text}>{text}</p>)}</details>}
               <button className="primary-button xc-again" onClick={() => setResult(null)}>再接一个</button>
+            </div>
+          ) : choice ? (
+            <div className="xc-model-step" data-step="model">
+              <div className="card-heading"><h2 id="step-title" ref={heading} tabIndex={-1}>{DEFAULT_MODEL_QUESTION}</h2>
+                <p>{DEFAULT_MODEL_NOTE}</p></div>
+              <div className="xc-models" role="radiogroup" aria-labelledby="step-title">
+                {choice.offers.map((offer) => (
+                  <button key={offer.id} type="button" role="radio" aria-checked={choice.picked === offer.id} className={choice.picked === offer.id ? "xc-model is-picked" : "xc-model"} data-model={offer.id} disabled={disabled} onClick={() => setChoice({ ...choice, picked: offer.id })}>
+                    <span className="xc-model-dot" aria-hidden="true">{choice.picked === offer.id && <Check size={14} strokeWidth={2.4} />}</span>
+                    <span className="xc-model-name">{offer.name}</span>
+                    {offer.recommended && <span className="xc-model-tag">推荐</span>}
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="primary-button xc-confirm" disabled={disabled} onClick={() => void writeChoice()}>{busy ? <LoaderCircle className="spinning" size={20} /> : <ClientIcon client={choice.client} size={20} />}{busy ? "正在接入…" : `接到 ${shortName(choice.client)}`}</button>
+              <button type="button" className="text-button xc-model-back" disabled={disabled} onClick={() => setChoice(null)}>返回上一步</button>
             </div>
           ) : (
             <>

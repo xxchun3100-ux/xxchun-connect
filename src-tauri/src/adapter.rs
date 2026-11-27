@@ -189,7 +189,7 @@ pub fn apply(paths: &Paths, input: ValidatedInput) -> Result<ImportResult, Strin
                         .and_then(|p| p.get("base_url"))
                         .and_then(Item::as_str)
                         == Some(format!("{}/v1", input.root).as_str());
-                let cached = storage::read_optional(&paths.codex.join("models_cache.json"))
+                let cached = storage::read_optional(&paths.dir(&paths.codex).join("models_cache.json"))
                     .ok()
                     .flatten();
                 let catalog = crate::codex_context::prepare_import(

@@ -88,21 +88,37 @@ impl Paths {
         paths.sandbox = false;
         Ok(paths)
     }
+    /// A configuration folder as it is to be used (0.1.10): where it is a link (a symbolic link, or a junction on
+    /// Windows) that can be followed safely, the place it points to; otherwise the path itself. A link that cannot
+    /// be followed stays as it is, and reading or writing through it is refused with a plain sentence.
+    pub fn dir(&self, raw: &Path) -> PathBuf {
+        follow_link(raw, &self.home, true).unwrap_or_else(|_| raw.to_path_buf())
+    }
+    /// Every read, backup, write and restore goes through here, so all of them use the same resolved place, and the
+    /// restore record stores it.
     pub fn target(&self, kind: FileKind) -> PathBuf {
-        match kind {
-            FileKind::ClaudeSettings => self.claude.join("settings.json"),
-            FileKind::ClaudeDesktopConfig => self.claude_desktop.join("claude_desktop_config.json"),
-            FileKind::ClaudeThreepConfig => self.claude_threep.join("claude_desktop_config.json"),
-            FileKind::ClaudeDesktopProfile => self.claude_threep.join(format!(
+        let raw = match kind {
+            FileKind::ClaudeSettings => self.dir(&self.claude).join("settings.json"),
+            FileKind::ClaudeDesktopConfig => self
+                .dir(&self.claude_desktop)
+                .join("claude_desktop_config.json"),
+            FileKind::ClaudeThreepConfig => self
+                .dir(&self.claude_threep)
+                .join("claude_desktop_config.json"),
+            FileKind::ClaudeDesktopProfile => self.dir(&self.claude_threep).join(format!(
                 "configLibrary/{}.json",
                 crate::desktop_config::PROFILE_ID
             )),
-            FileKind::ClaudeDesktopMeta => self.claude_threep.join("configLibrary/_meta.json"),
+            FileKind::ClaudeDesktopMeta => self
+                .dir(&self.claude_threep)
+                .join("configLibrary/_meta.json"),
             FileKind::ClaudeVscode => self.vscode.clone(),
-            FileKind::CodexConfig => self.codex.join("config.toml"),
-            FileKind::CodexAuth => self.codex.join("auth.json"),
-            FileKind::CodexCatalog => self.codex.join("xxchun-connect-models.json"),
-        }
+            FileKind::CodexConfig => self.dir(&self.codex).join("config.toml"),
+            FileKind::CodexAuth => self.dir(&self.codex).join("auth.json"),
+            FileKind::CodexCatalog => self.dir(&self.codex).join("xxchun-connect-models.json"),
+        };
+        // The file itself may be the link (config.toml kept elsewhere): the same rule.
+        follow_link(&raw, &self.home, false).unwrap_or(raw)
     }
     /// The extension can override CLAUDE_CONFIG_DIR independently of Connect's process.
     /// Use the same resolution for preview, write and restore; never silently choose another home.
@@ -291,11 +307,142 @@ pub(crate) fn record_time(path: &Path) -> Option<u64> {
         .map(|t| t.as_secs())
 }
 
-pub fn reject_symlink(path: &Path) -> Result<(), String> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(format!("{} 是符号链接，首版不会修改它。", path.display()));
+// ---- a configuration folder (or file) that is a link (0.1.10) ----
+// A customer kept `C:\Users\<name>\.codex` on another drive behind a link, and the first versions refused any link.
+// Now a link is followed (Paths::dir, Paths::target) when its target exists, is of the right kind (a folder for a
+// folder, a file for a file), and lies in a place of the user's own: inside the user's folder, or — on Windows — on
+// another fixed local drive outside the system folders. A network place, a system folder, another user's folder, a
+// dangling link or a loop is not followed, and nothing is changed; the customer reads how to connect by hand.
+pub const MOVED_CODEX: &str = "你的 Codex 配置文件夹被放到了别的位置，我们没能安全地找到它，所以没有改动任何东西。可以手动接：接口地址 https://api.xxchunai.com/v1 ，密钥就是你刚才粘贴的那把。";
+pub const MOVED_CLAUDE: &str = "你的 Claude 配置文件夹被放到了别的位置，我们没能安全地找到它，所以没有改动任何东西。可以手动接：接口地址 https://api.xxchunai.com ，密钥就是你刚才粘贴的那把。";
+fn moved_message(path: &Path) -> String {
+    // Which tool the path belongs to is read from its own last parts (.codex, .claude, Claude-3p …), not from
+    // whatever folder names come before them.
+    for part in path.components().rev().take(3) {
+        let name = part.as_os_str().to_string_lossy().to_lowercase();
+        if name.contains("xxchun-connect") && !name.ends_with(".json") {
+            return "这个小工具自己的备份文件夹是一个链接，为了安全没有改动任何东西。".to_string();
         }
+        if name.contains("codex") {
+            return MOVED_CODEX.to_string();
+        }
+        if name.contains("claude") {
+            return MOVED_CLAUDE.to_string();
+        }
+    }
+    MOVED_CLAUDE.to_string()
+}
+fn is_link(path: &Path) -> bool {
+    // (on Windows a junction is reported as a symbolic link too)
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+// What canonicalize answers, as an ordinary path: on Windows `\\?\C:\…` becomes `C:\…`, and anything that is not on
+// a drive letter (a network share, a device) is no place to follow a link to.
+#[cfg(windows)]
+fn plain_path(path: PathBuf) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    let mut parts = path.components();
+    let letter = match parts.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::VerbatimDisk(letter) | Prefix::Disk(letter) => letter,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let mut out = PathBuf::from(format!("{}:\\", (letter as char).to_ascii_uppercase()));
+    for part in parts {
+        if let Component::Normal(name) = part {
+            out.push(name);
+        }
+    }
+    Some(out)
+}
+#[cfg(not(windows))]
+fn plain_path(path: PathBuf) -> Option<PathBuf> {
+    Some(path)
+}
+#[cfg(windows)]
+fn allowed_place(target: &Path, home: &Path) -> bool {
+    let lower = |path: &Path| path.to_string_lossy().to_lowercase().replace('/', "\\");
+    let inside = |base: &str, text: &str| {
+        let base = base.trim_end_matches('\\');
+        !base.is_empty() && (text == base || text.starts_with(&format!("{base}\\")))
+    };
+    let text = lower(target);
+    let home_real = fs::canonicalize(home)
+        .ok()
+        .and_then(plain_path)
+        .unwrap_or_else(|| home.to_path_buf());
+    let home_text = lower(&home_real);
+    if inside(&home_text, &text) || inside(&lower(home), &text) {
+        return true;
+    }
+    // Outside the user's folder: only another drive, a fixed local one, and not a system folder.
+    if text.chars().next() == home_text.chars().next() {
+        return false;
+    }
+    for key in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+        if let Some(value) = std::env::var_os(key) {
+            if inside(&lower(Path::new(&value)), &text) {
+                return false;
+            }
+        }
+    }
+    fixed_drive(target)
+}
+#[cfg(windows)]
+fn fixed_drive(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    let text = path.to_string_lossy();
+    let letter = match text.chars().next() {
+        Some(letter) if letter.is_ascii_alphabetic() => letter,
+        _ => return false,
+    };
+    let root: Vec<u16> = std::ffi::OsStr::new(&format!("{letter}:\\"))
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // DRIVE_FIXED is 3: not a removable disk, not a network drive, not a disc.
+    unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) == 3 }
+}
+// Elsewhere (macOS, Linux): inside the user's own folder only. Whether a volume under /Volumes is a local disk or a
+// network share cannot be told without more than the standard library, so such a place is not followed.
+#[cfg(not(windows))]
+fn allowed_place(target: &Path, home: &Path) -> bool {
+    let home_real = fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    target.starts_with(&home_real) || target.starts_with(home)
+}
+/// The place a link points to, when it may be followed (see above); the path itself when it is no link.
+pub(crate) fn follow_link(path: &Path, home: &Path, want_dir: bool) -> Result<PathBuf, String> {
+    if !is_link(path) {
+        return Ok(path.to_path_buf());
+    }
+    let target = match fs::canonicalize(path).ok().and_then(plain_path) {
+        Some(target) => target,
+        None => return Err(moved_message(path)),
+    };
+    let kind_ok = match fs::metadata(&target) {
+        Ok(meta) => {
+            if want_dir {
+                meta.is_dir()
+            } else {
+                meta.is_file()
+            }
+        }
+        Err(_) => false,
+    };
+    if !kind_ok || !allowed_place(&target, home) {
+        return Err(moved_message(path));
+    }
+    Ok(target)
+}
+
+/// A link that was not followed (Paths::target leaves it in place) is never read or written through.
+pub fn reject_symlink(path: &Path) -> Result<(), String> {
+    if is_link(path) {
+        return Err(moved_message(path));
     }
     Ok(())
 }
@@ -586,5 +733,166 @@ mod tests {
             Some("newer")
         );
         assert!(!paths.has_backup(Client::Claude));
+    }
+
+    // ---- 0.1.10: a configuration folder or file that is a link ----
+    // Making a link: a symbolic link; on Windows, where that needs a privilege a CI runner may not have, a junction
+    // for a folder (no privilege needed). `false` = this machine cannot make one, and the test says so and stops.
+    #[cfg(unix)]
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(unix)]
+    fn link_file(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(windows)]
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return true;
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    fn link_file(target: &Path, link: &Path) -> bool {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+    fn same_place(a: &Path, b: &Path) -> bool {
+        fs::canonicalize(a).unwrap() == fs::canonicalize(b).unwrap()
+    }
+    #[test]
+    fn a_linked_config_folder_is_followed_written_and_restored_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let real = home.join("elsewhere").join("codex-real");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("config.toml"), "old").unwrap();
+        let link = home.join(".codex");
+        if !link_dir(&real, &link) {
+            eprintln!("SKIPPED: this machine cannot create a directory link");
+            return;
+        }
+        let paths = Paths::for_home(home);
+        let target = paths.target(FileKind::CodexConfig);
+        // The resolved place, not the link: that is what is read, backed up, written and recorded.
+        assert!(same_place(target.parent().unwrap(), &real));
+        assert!(!target.starts_with(&link));
+        assert_eq!(read_optional(&target).unwrap().as_deref(), Some("old"));
+        assert!(commit(
+            &paths,
+            Client::Codex,
+            vec![Change {
+                kind: FileKind::CodexConfig,
+                before: Some("old".into()),
+                after: "new".into()
+            }]
+        )
+        .unwrap());
+        assert_eq!(fs::read_to_string(real.join("config.toml")).unwrap(), "new");
+        // The link is still a link (it was not replaced by a folder), and the record names the resolved file.
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        let record = fs::read_to_string(paths.record(Client::Codex, false)).unwrap();
+        let saved: Backup = serde_json::from_str(&record).unwrap();
+        assert_eq!(saved.entries[0].path, target);
+        restore(&paths, Client::Codex).unwrap();
+        assert_eq!(fs::read_to_string(real.join("config.toml")).unwrap(), "old");
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    }
+    #[test]
+    fn a_linked_config_file_is_followed_and_restored_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let real = home.join("dotfiles").join("codex-config.toml");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "old").unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let link = home.join(".codex").join("config.toml");
+        if !link_file(&real, &link) {
+            eprintln!("SKIPPED: this machine cannot create a file link (on Windows that needs a privilege)");
+            return;
+        }
+        let paths = Paths::for_home(home);
+        let target = paths.target(FileKind::CodexConfig);
+        assert!(same_place(&target, &real));
+        assert!(commit(
+            &paths,
+            Client::Codex,
+            vec![Change {
+                kind: FileKind::CodexConfig,
+                before: Some("old".into()),
+                after: "new".into()
+            }]
+        )
+        .unwrap());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        restore(&paths, Client::Codex).unwrap();
+        assert_eq!(fs::read_to_string(&real).unwrap(), "old");
+    }
+    #[test]
+    fn a_link_that_cannot_be_followed_changes_nothing_and_says_how_to_connect_by_hand() {
+        // Dangling: the folder it pointed to is gone.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let gone = home.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        if !link_dir(&gone, &home.join(".codex")) || !link_dir(&gone, &home.join(".claude")) {
+            eprintln!("SKIPPED: this machine cannot create a directory link");
+            return;
+        }
+        fs::remove_dir(&gone).unwrap();
+        let paths = Paths::for_home(home);
+        let target = paths.target(FileKind::CodexConfig);
+        assert_eq!(read_optional(&target).unwrap_err(), MOVED_CODEX);
+        let refused = commit(
+            &paths,
+            Client::Codex,
+            vec![Change {
+                kind: FileKind::CodexConfig,
+                before: None,
+                after: "new".into(),
+            }],
+        )
+        .unwrap_err();
+        assert!(refused.contains("你的 Codex 配置文件夹被放到了别的位置，我们没能安全地找到它，所以没有改动任何东西。"));
+        assert!(refused.contains("https://api.xxchunai.com/v1"));
+        assert!(!gone.exists());
+        assert!(!paths.has_backup(Client::Codex));
+        assert_eq!(
+            read_optional(&paths.target(FileKind::ClaudeSettings)).unwrap_err(),
+            MOVED_CLAUDE
+        );
+        assert!(MOVED_CLAUDE.contains("https://api.xxchunai.com ，"));
+        // A place that is not the user's own: a folder outside the user's folder (on the same drive).
+        let outside = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let home = other.path();
+        fs::write(outside.path().join("config.toml"), "theirs").unwrap();
+        if !link_dir(outside.path(), &home.join(".codex")) {
+            return;
+        }
+        let paths = Paths::for_home(home);
+        assert_eq!(
+            read_optional(&paths.target(FileKind::CodexConfig)).unwrap_err(),
+            MOVED_CODEX
+        );
+        assert_eq!(
+            fs::read_to_string(outside.path().join("config.toml")).unwrap(),
+            "theirs"
+        );
+        // A folder link that points at a file is not a configuration folder.
+        let third = tempfile::tempdir().unwrap();
+        let home = third.path();
+        fs::write(home.join("a-file"), "x").unwrap();
+        if link_file(&home.join("a-file"), &home.join(".codex")) {
+            let paths = Paths::for_home(home);
+            assert!(read_optional(&paths.target(FileKind::CodexConfig)).is_err());
+        }
     }
 }

@@ -210,3 +210,35 @@
 - `tests/brand.test.mjs` 新增一条：`src/`、`src-tauri/src/`、打包脚本、工作流里不再出现旧显示名（`adapter.rs` 里解释兼容的那句注释除外），并且 ID 和目录名还在。
 
 没有验证的：Rust 仍只在 GitHub Actions 上编译和测试；打出来的两个包没有人实际打开过；没有拿一台真的装过 0.1.8 的电脑试过升级（只有上面的测试）。
+
+## 0.1.10：默认模型自己选；跟着链接找配置文件夹
+
+### 默认模型（`src/quick.ts`、`src/App.tsx`、`src/styles.css`）
+
+- 读到模型以后不再直接写配置，先出一屏「默认用哪个模型？」：`modelChoices` 给出能用的模型（名字用服务返回的 `name`，没有就用 id）和推荐的那个；点「接到 …」才写（`writeChoice`）。能用的模型仍然全部写进去，`defaultModel` 是选中的那个。
+- 推荐规则在 `pickModels`：Claude 取 Sonnet；Codex 取 `gpt-6.1-sol`，没有就取第二个，再没有取第一个。原因：商城把最贵的 `gpt-6.2-astra` 排在第一，以前它就成了默认。
+- 这一屏不显示价格。选中的一行用墨色描边标出来，强调色只在确认按钮上（沿用应用现有的主按钮颜色）。
+- 写入失败（比如读到的结果过期了）回到第一屏，按「再试一次」会重新读。
+
+### 链接（`src-tauri/src/storage.rs`）
+
+- `Paths::dir` 和 `Paths::target`：配置文件夹（`.codex`、`.claude`、Claude 桌面版的两个数据目录）或配置文件本身是链接（符号链接；Windows 的目录联接也算）时，用 `fs::canonicalize` 找到真正的位置。所有读、备份、写、恢复都经过 `target`，所以用的是同一个位置，恢复记录里存的也是它。
+- 允许跟的位置（`allowed_place`）：用户文件夹里面；Windows 上还可以是另一个盘符，必须是本地固定硬盘（`GetDriveTypeW` 等于 3），不在 `SystemRoot`、`ProgramFiles`、`ProgramFiles(x86)`、`ProgramData` 下面。解析出来不是盘符开头的（网络共享、设备路径）不跟。Mac / Linux 只允许用户文件夹里面：标准库分不清 `/Volumes` 下面是本地盘还是网络盘。
+- 跟不了的链接保持原样，`reject_symlink` 照旧拦住，报错换成写明怎么手动接的那句（`MOVED_CODEX`、`MOVED_CLAUDE`）。这个工具自己的备份目录（`.xxchun-connect`）是链接时仍然不动。
+- `adapter.rs` 读 `models_cache.json` 也走 `Paths::dir`。
+- `Cargo.toml`：`windows-sys` 多开一个特性 `Win32_Storage_FileSystem`（`GetDriveTypeW`）。
+
+### 内置模型参数（`codex_model_profiles.json`）
+
+补了 `gpt-6.2-astra`、`gpt-6.2-sol`、`gpt-6.1-terra`，数值和同系列的 `gpt-6.1-sol` 一样（272,000 / 872,000，六档推理强度，默认 low）。这三个的数值没有单独核实过，是照邻近型号填的；服务返回的参数优先，这里只在服务没给的时候用。
+
+### 测试
+
+- `tests/quick.test.ts`：推荐规则、给客户看的列表（名字、推荐标记、不出现价格）。本机跑过。
+- `storage.rs` 新增三个测试：目录链接跟过去并能写、能恢复；文件链接同样；跟不了的（目标没了、在用户文件夹外面、目录链接指向文件）什么都不改并给出那句话。Windows 上建不了符号链接时改用目录联接（`mklink /J`），都建不了就打印 SKIPPED 后结束。**这些只在 GitHub Actions 上编译和运行，本机没有编译过 Rust。**
+
+### 没有在这台机器上验证的
+
+- Rust 部分全部（编译、三个新测试、原有测试）。
+- 真实的 Windows 目录联接和另一块盘上的目标；`GetDriveTypeW` 对移动硬盘、网络盘的返回值。
+- Mac 上链接到外接硬盘：按现在的规则不会跟，会给出手动接的那句话。

@@ -21,10 +21,25 @@ export function splitError(text: string): { message: string; detail: string } {
   const [message, ...rest] = text.split("\n");
   return { message: message.trim(), detail: rest.join(" ").trim() };
 }
-// Every model the key offers that the client can use; the default is, for Claude, the Sonnet (the everyday one),
-// otherwise the first one the shop lists.
+// Every model the key offers that the client can use, and the one that is RECOMMENDED as the default (0.1.10: the
+// customer chooses; this is only what is preselected). The everyday model, never simply the first one listed (the shop
+// lists its dearest Codex model first): for Claude the Sonnet; for Codex gpt-6.1-sol when it is offered, else the
+// second one listed; where there is neither, the first.
+export const CODEX_EVERYDAY_MODEL = "gpt-6.1-sol";
 export function pickModels(client: Client, ids: string[]): { ids: string[]; defaultId: string } {
   const usable = [...new Set(ids)].filter((id) => modelSelectable(client, id)).slice(0, MAX_MODELS);
-  const preferred = clientFamily(client) === "claude" ? usable.find((id) => /sonnet/i.test(id)) : undefined;
+  const preferred = clientFamily(client) === "claude" ? usable.find((id) => /sonnet/i.test(id)) : usable.find((id) => id === CODEX_EVERYDAY_MODEL) ?? usable[1];
   return { ids: usable, defaultId: preferred ?? usable[0] ?? "" };
+}
+// The step between reading the key and writing the configuration: which model the tool starts with. All usable models
+// are written either way, so the picker inside the tool shows every one of them.
+export const DEFAULT_MODEL_QUESTION = "默认用哪个模型？";
+export const DEFAULT_MODEL_NOTE = "接好以后在 Codex / Claude 里也能随时换。";
+export interface ModelOffer { id: string; name: string; recommended: boolean }
+// `usableToo`: a further test of the caller's (what the capability probe said about each model).
+export function modelChoices(client: Client, models: { id: string; name?: string | null }[], usableToo: (id: string) => boolean = () => true): { choices: ModelOffer[]; ids: string[]; recommendedId: string } {
+  const names = new Map<string, string>();
+  for (const model of models) if (!names.has(model.id)) names.set(model.id, typeof model.name === "string" && model.name.trim() ? model.name.trim() : model.id);
+  const picked = pickModels(client, [...names.keys()].filter(usableToo));
+  return { choices: picked.ids.map((id) => ({ id, name: names.get(id) ?? id, recommended: id === picked.defaultId })), ids: picked.ids, recommendedId: picked.defaultId };
 }
