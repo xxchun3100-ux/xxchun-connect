@@ -226,6 +226,9 @@ fn codex_import_removes_only_reasoning_preferences_unsupported_by_the_new_model(
     assert_eq!(doc["plan_mode_reasoning_effort"].as_str(), Some("high"));
 }
 
+// 0.1.10: a linked configuration file is followed when its target is inside the user's folder, and refused, with
+// nothing written, when it points anywhere else. (Until 0.1.9 every link was refused.) The private permissions are
+// those of the file that is really written: the resolved one.
 #[cfg(unix)]
 #[test]
 fn private_permissions_and_symlink_protection() {
@@ -243,13 +246,56 @@ fn private_permissions_and_symlink_protection() {
         );
     }
     storage::restore(&paths, Client::Claude).unwrap();
-    let outside = home.path().join("important.json");
+
+    // A link to a file inside the user's folder: followed. What is written is the file it points to, with private
+    // permissions; the link stays a link; restore puts the old content back in the same place.
+    let link = home.path().join(".claude").join("settings.json");
+    let inside = home.path().join("dotfiles").join("claude-settings.json");
+    fs::create_dir_all(inside.parent().unwrap()).unwrap();
+    fs::write(&inside, "{}").unwrap();
+    fs::set_permissions(&inside, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!link.exists());
+    symlink(&inside, &link).unwrap();
+    let resolved = paths.target(FileKind::ClaudeSettings);
+    assert_eq!(
+        fs::canonicalize(&resolved).unwrap(),
+        fs::canonicalize(&inside).unwrap()
+    );
+    assert!(!resolved.starts_with(home.path().join(".claude")));
+    adapter::apply(&paths, input(Client::Claude)).unwrap();
+    let written = fs::read_to_string(&inside).unwrap();
+    assert_ne!(written, "{}");
+    assert!(written.contains("ANTHROPIC") || written.contains("model"));
+    assert_eq!(
+        fs::metadata(&inside).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    storage::restore(&paths, Client::Claude).unwrap();
+    assert_eq!(fs::read_to_string(&inside).unwrap(), "{}");
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    // A link to a file outside the user's folder: refused with the sentence that says how to connect by hand, and
+    // nothing is written there or anywhere.
+    fs::remove_file(&link).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("important.json");
     fs::write(&outside, "{}").unwrap();
-    symlink(&outside, paths.target(FileKind::ClaudeSettings)).unwrap();
-    assert!(adapter::apply(&paths, input(Client::Claude))
-        .unwrap_err()
-        .contains("符号链接"));
+    symlink(&outside, &link).unwrap();
+    let refused = adapter::apply(&paths, input(Client::Claude)).unwrap_err();
+    assert!(
+        refused.contains("你的 Claude 配置文件夹被放到了别的位置，我们没能安全地找到它，所以没有改动任何东西。"),
+        "{refused}"
+    );
+    assert!(refused.contains("https://api.xxchunai.com"), "{refused}");
     assert_eq!(fs::read_to_string(&outside).unwrap(), "{}");
+    assert!(!paths.pending(Client::Claude));
 }
 
 #[test]
